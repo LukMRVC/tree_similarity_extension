@@ -1,0 +1,5 @@
+comment = 'tree_similarity_extension:  Created by lukas.moravec.st2@vsb.cz'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/tree_similarity_extension'
+relocatable = false
+superuser = true
