@@ -2,6 +2,9 @@ use pgrx::prelude::*;
 
 pgrx::pg_module_magic!();
 
+mod types;
+use types::tree_arena;
+
 #[pg_extern]
 fn hello_tree_similarity_extension() -> &'static str {
     "Hello, from my own extension 2!"
