@@ -1,4 +1,4 @@
-# Tree similarity Postgresql extension
+# Tree similarity PostgreSQL extension
 
 ### This is a WIP. Incompatible changes may and can occur at any time.
 
