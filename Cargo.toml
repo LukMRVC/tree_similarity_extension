@@ -17,8 +17,10 @@ pg16 = ["pgrx/pg16", "pgrx-tests/pg16" ]
 pg_test = []
 
 [dependencies]
+memchr = "2.7.4"
 pgrx = "=0.11.4"
 serde = { version = "1.0.207", features = ["derive"] }
+thiserror = "1.0.63"
 
 [dev-dependencies]
 pgrx-tests = "=0.11.4"

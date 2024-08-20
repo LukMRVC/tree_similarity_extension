@@ -1732,9 +1732,11 @@ dependencies = [
 name = "tree_similarity_extension"
 version = "0.0.0"
 dependencies = [
+ "memchr",
  "pgrx",
  "pgrx-tests",
  "serde",
+ "thiserror",
 ]
 
 [[package]]

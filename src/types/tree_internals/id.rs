@@ -31,15 +31,15 @@ impl NodeId {
         Descendants::new(arena, self)
     }
 
-    pub fn traverse<T>(self, arena: &TreeArena) -> Traverse<'_> {
+    pub fn traverse(self, arena: &TreeArena) -> Traverse<'_> {
         Traverse::new(arena, self)
     }
 
-    pub fn predecessors<T>(self, arena: &TreeArena) -> Predecessors<'_> {
+    pub fn predecessors(self, arena: &TreeArena) -> Predecessors<'_> {
         Predecessors::new(arena, self)
     }
 
-    pub fn reverse_traverse<T>(self, arena: &TreeArena) -> ReverseTraverse<'_> {
+    pub fn reverse_traverse(self, arena: &TreeArena) -> ReverseTraverse<'_> {
         ReverseTraverse::new(arena, self)
     }
 

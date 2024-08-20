@@ -1,12 +1,10 @@
 use super::tree_internals::{node::Node, id::NodeId};
 use pgrx::prelude::*;
 use serde::*;
-use std::{
-    ops::{Index, IndexMut},
-    slice,
-    mem,
-    num::NonZeroUsize,
-};
+use std::{ops::{Index, IndexMut}, slice, mem, num::NonZeroUsize, fmt};
+use std::fmt::Formatter;
+use crate::parsing::parse_tree;
+use crate::types::tree_internals::traversals::NodeEdge;
 
 #[derive(PostgresType, Serialize, Deserialize, Debug, Default, Eq, PartialEq)]
 #[inoutfuncs]
@@ -21,11 +19,11 @@ impl InOutFuncs for TreeArena {
     where
         Self: Sized,
     {
-        todo!("Implement input parsing for TreeArena.")
+        parse_tree(input).unwrap()
     }
 
     fn output(&self, buffer: &mut pgrx::StringInfo) {
-        todo!("Implement output dipslay for TreeArena")
+        buffer.push_str(&self.to_string())
     }
 }
 
@@ -46,6 +44,31 @@ impl TreeArena {
     /// Returns the number of nodes the arena can hold without reallocating.
     pub fn capacity(&self) -> usize {
         self.nodes.capacity()
+    }
+
+    pub fn get_root_id(&self) -> Option<NodeId> {
+        if self.nodes.is_empty() {
+            None
+        } else {
+            let node_id = NonZeroUsize::new(1)?;
+            Some(NodeId::from_non_zero_usize(node_id))
+        }
+    }
+
+    pub fn get_root(&self) -> Option<&Node> {
+        if self.nodes.is_empty() {
+            None
+        } else {
+            self.nodes.get(0)
+        }
+    }
+
+    pub fn get_root_mut(&mut self) -> Option<&mut Node> {
+        if self.nodes.is_empty() {
+            None
+        } else {
+            self.nodes.get_mut(0)
+        }
     }
 
     /// Retrieves the `NodeId` corresponding to a `Node` in the `Arena`.
@@ -145,5 +168,29 @@ impl Index<NodeId> for TreeArena {
 impl IndexMut<NodeId> for TreeArena {
     fn index_mut(&mut self, node: NodeId) -> &mut Node {
         &mut self.nodes[node.index()]
+    }
+}
+
+impl fmt::Display for TreeArena {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut bracket_notation = String::with_capacity(self.count() * 2);
+        let Some(root) = self.iter().next() else {
+            panic!("Root not found!");
+        };
+        let root_id = self.get_node_id(root).expect("Root ID not found!");
+
+        for edge in root_id.traverse(self) {
+            match edge {
+                NodeEdge::Start(node_id) => {
+                    bracket_notation.push('{');
+                    bracket_notation.push_str(self.get(node_id).unwrap().get());
+                }
+                NodeEdge::End(_) => {
+                    bracket_notation.push('}');
+                }
+            }
+        }
+
+        write!(f, "{}", bracket_notation)
     }
 }
