@@ -2,16 +2,13 @@ use pgrx::prelude::*;
 
 pgrx::pg_module_magic!();
 
-mod types;
+mod lb;
 mod parsing;
+mod types;
 
-use types::tree_arena;
+use crate::lb::label_intersection::label_intersection_distance;
 use crate::types::tree_arena::TreeArena;
-
-#[pg_extern]
-fn hello_tree_similarity_extension() -> &'static str {
-    "Hello, from my own extension 2!"
-}
+use types::tree_arena;
 
 #[pg_extern]
 fn add_node_to_tree_root(mut input_tree: TreeArena, node_value: String) -> TreeArena {
@@ -25,17 +22,28 @@ fn add_node_to_tree_root(mut input_tree: TreeArena, node_value: String) -> TreeA
     input_tree
 }
 
+// TODO: LB filter functions
+#[pg_extern(immutable, parallel_safe)]
+fn tree_lb_label_intersect(t1: TreeArena, t2: TreeArena) -> i16 {
+    let lb = label_intersection_distance(&t1, &t2, t1.count() + t2.count());
+    lb as i16
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
+    use super::*;
     use pgrx::prelude::*;
+    use std::ffi::CString;
 
     #[pg_test]
-    fn test_hello_tree_similarity_extension() {
+    fn test_label_intersection() {
+        let t1 = parsing::parse_tree(&CString::new("{a{b}{c}}").unwrap()).unwrap();
+        let t2 = parsing::parse_tree(&CString::new("{a{d}{c}}").unwrap()).unwrap();
         assert_eq!(
-            "Hello, from my own extension 2!",
-            crate::hello_tree_similarity_extension()
-        );
+            label_intersection_distance(&t1, &t2, t1.count() + t2.count()),
+            1
+        )
     }
 }
 

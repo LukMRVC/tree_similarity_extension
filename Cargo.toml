@@ -4,11 +4,14 @@ version = "0.0.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "pgrx_embed_tree_similarity_extension"
+path = "./src/bin/pgrx_embed.rs"
 
 [features]
-default = ["pg13"]
-pg11 = ["pgrx/pg11", "pgrx-tests/pg11" ]
+default = ["pg15"]
 pg12 = ["pgrx/pg12", "pgrx-tests/pg12" ]
 pg13 = ["pgrx/pg13", "pgrx-tests/pg13" ]
 pg14 = ["pgrx/pg14", "pgrx-tests/pg14" ]
@@ -18,12 +21,13 @@ pg_test = []
 
 [dependencies]
 memchr = "2.7.4"
-pgrx = "=0.11.4"
+pgrx = "=0.12.1"
+rustc-hash = "2.0.0"
 serde = { version = "1.0.207", features = ["derive"] }
 thiserror = "1.0.63"
 
 [dev-dependencies]
-pgrx-tests = "=0.11.4"
+pgrx-tests = "=0.12.1"
 
 [profile.dev]
 panic = "unwind"

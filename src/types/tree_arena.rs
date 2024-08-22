@@ -1,10 +1,15 @@
-use super::tree_internals::{node::Node, id::NodeId};
-use pgrx::prelude::*;
-use serde::*;
-use std::{ops::{Index, IndexMut}, slice, mem, num::NonZeroUsize, fmt};
-use std::fmt::Formatter;
+use super::tree_internals::{id::NodeId, node::Node};
 use crate::parsing::parse_tree;
 use crate::types::tree_internals::traversals::NodeEdge;
+use pgrx::prelude::*;
+use serde::*;
+use std::fmt::Formatter;
+use std::{
+    fmt, mem,
+    num::NonZeroUsize,
+    ops::{Index, IndexMut},
+    slice,
+};
 
 #[derive(PostgresType, Serialize, Deserialize, Debug, Default, Eq, PartialEq)]
 #[inoutfuncs]
@@ -29,12 +34,12 @@ impl InOutFuncs for TreeArena {
 
 impl TreeArena {
     /// Creates a new empty `TreeArena` with enough capacity to store `n` nodes.
-    pub fn new() -> Self  {
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// Creates a new empty `TreeArena` with enough capacity to store `n` nodes.
-    pub fn with_capacity(n: usize) -> Self  {
+    pub fn with_capacity(n: usize) -> Self {
         Self {
             nodes: Vec::with_capacity(n),
             ..Self::default()
@@ -83,9 +88,7 @@ impl TreeArena {
         let node_index = (p as usize - nodes_range.start as usize) / mem::size_of::<Node>();
         let node_id = NonZeroUsize::new(node_index.wrapping_add(1))?;
 
-        Some(NodeId::from_non_zero_usize(
-            node_id,
-        ))
+        Some(NodeId::from_non_zero_usize(node_id))
     }
 
     /// Creates a new node from its associated data.
@@ -129,7 +132,6 @@ impl TreeArena {
     pub fn get_mut(&mut self, id: NodeId) -> Option<&mut Node> {
         self.nodes.get_mut(id.index())
     }
-
 
     /// Returns an iterator of all nodes in the arena in storage-order.
     pub fn iter(&self) -> slice::Iter<Node> {

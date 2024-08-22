@@ -1,9 +1,8 @@
-use std::ffi::CStr;
-use std::io;
 use super::tree_arena::TreeArena;
 use memchr::memchr2_iter;
+use std::ffi::CStr;
+use std::io;
 use thiserror::Error;
-
 
 #[derive(Error, Debug)]
 pub enum TreeParseError {
@@ -21,7 +20,6 @@ const TOKEN_OPEN_NODE: u8 = b'{';
 const TOKEN_CLOSE_NODE: u8 = b'}';
 const TOKEN_ESCAPE: u8 = b'\\';
 
-
 #[inline(always)]
 fn is_escaped(byte_string: &[u8], offset: usize) -> bool {
     offset > 0
@@ -29,21 +27,22 @@ fn is_escaped(byte_string: &[u8], offset: usize) -> bool {
         && !(offset > 1 && byte_string[offset - 2] == TOKEN_ESCAPE)
 }
 
-pub fn parse_tree(
-    tree_bracket_str: &CStr,
-) -> Result<TreeArena, TreeParseError> {
+pub fn parse_tree(tree_bracket_str: &CStr) -> Result<TreeArena, TreeParseError> {
     use TreeParseError as TPE;
 
     let tree_bracket_bytes = tree_bracket_str.to_bytes();
     if tree_bracket_bytes[0] == TOKEN_ESCAPE {
-        return Err(TPE::IncorrectFormat("Tree bracket string starts with escape char \\".to_owned()));
+        return Err(TPE::IncorrectFormat(
+            "Tree bracket string starts with escape char \\".to_owned(),
+        ));
     }
 
     let mut tree = TreeArena::with_capacity(tree_bracket_bytes.len() / 3);
 
-    let token_positions: Vec<usize> = memchr2_iter(TOKEN_OPEN_NODE, TOKEN_CLOSE_NODE, tree_bracket_bytes)
-        .filter(|char_pos| !is_escaped(tree_bracket_bytes, *char_pos))
-        .collect();
+    let token_positions: Vec<usize> =
+        memchr2_iter(TOKEN_OPEN_NODE, TOKEN_CLOSE_NODE, tree_bracket_bytes)
+            .filter(|char_pos| !is_escaped(tree_bracket_bytes, *char_pos))
+            .collect();
 
     let mut tokens = token_positions.iter().peekable();
     let root_start = *tokens.next().unwrap();
@@ -57,17 +56,18 @@ pub fn parse_tree(
 
     let mut node_stack = vec![root];
 
-
     while let Some(token) = tokens.next() {
         match tree_bracket_bytes[*token] {
             TOKEN_OPEN_NODE => {
                 let Some(token_end) = tokens.peek() else {
-                    let err_msg =
-                        format!("Label has no ending token near col {token}");
+                    let err_msg = format!("Label has no ending token near col {token}");
                     return Err(TPE::IncorrectFormat(err_msg));
                 };
-                let label =
-                    unsafe { String::from_utf8_unchecked(tree_bracket_bytes[(*token + 1)..**token_end].to_vec()) };
+                let label = unsafe {
+                    String::from_utf8_unchecked(
+                        tree_bracket_bytes[(*token + 1)..**token_end].to_vec(),
+                    )
+                };
 
                 let n = tree.new_node(label);
                 let Some(last_node) = node_stack.last() else {
