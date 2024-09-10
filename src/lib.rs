@@ -1,3 +1,6 @@
+use cppffi::tree_ted;
+use cxx::let_cxx_string;
+
 use pgrx::prelude::*;
 
 pgrx::pg_module_magic!();
@@ -9,6 +12,16 @@ mod types;
 use crate::lb::label_intersection::label_intersection_distance;
 use crate::types::tree_arena::TreeArena;
 use types::tree_arena;
+
+#[cxx::bridge]
+mod cppffi {
+
+    unsafe extern "C++" {
+        include!("tree_similarity_extension/include/apted.h");
+
+        fn tree_ted(a: &CxxString, b: &CxxString) -> u32;
+    }
+}
 
 #[pg_extern]
 fn add_node_to_tree_root(mut input_tree: TreeArena, node_value: String) -> TreeArena {
@@ -27,6 +40,14 @@ fn add_node_to_tree_root(mut input_tree: TreeArena, node_value: String) -> TreeA
 fn tree_lb_label_intersect(t1: TreeArena, t2: TreeArena) -> i16 {
     let lb = label_intersection_distance(&t1, &t2, t1.count() + t2.count());
     lb as i16
+}
+
+#[pg_extern]
+fn tree_ed() -> i32 {
+    let_cxx_string!(s1 = "{a{b}{c{h}}}");
+    let_cxx_string!(s2 = "{a{d}{c}{f}}");
+
+    tree_ted(&s1, &s2) as i32
 }
 
 #[cfg(any(test, feature = "pg_test"))]
