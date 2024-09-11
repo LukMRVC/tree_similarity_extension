@@ -9,7 +9,10 @@ mod lb;
 mod parsing;
 mod types;
 
-use crate::lb::label_intersection::label_intersection_distance;
+use crate::lb::{
+    label_intersection::{bounded_label_intersection_distance, label_intersection_distance},
+    sed::{bounded_sed, sed},
+};
 use crate::types::tree_arena::TreeArena;
 use types::tree_arena;
 
@@ -37,9 +40,28 @@ fn add_node_to_tree_root(mut input_tree: TreeArena, node_value: String) -> TreeA
 
 // TODO: LB filter functions
 #[pg_extern(immutable, parallel_safe)]
-fn tree_lb_label_intersect(t1: TreeArena, t2: TreeArena) -> i16 {
-    let lb = label_intersection_distance(&t1, &t2, t1.count() + t2.count());
-    lb as i16
+fn tree_lb_label_intersect(t1: TreeArena, t2: TreeArena) -> i32 {
+    let lb = label_intersection_distance(&t1, &t2);
+    lb as i32
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn tree_lb_bounded_label_intersect(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
+    let lb = bounded_label_intersection_distance(&t1, &t2, lb as usize);
+    lb as i32
+}
+
+// TODO: LB filter functions
+#[pg_extern(immutable, parallel_safe)]
+fn tree_lb_sed(t1: TreeArena, t2: TreeArena) -> i32 {
+    let lb = sed(&t1, &t2);
+    lb as i32
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn tree_lb_bounded_sed(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
+    let lb = bounded_sed(&t1, &t2, lb as usize);
+    lb as i32
 }
 
 #[pg_extern]
@@ -61,10 +83,7 @@ mod tests {
     fn test_label_intersection() {
         let t1 = parsing::parse_tree(&CString::new("{a{b}{c}}").unwrap()).unwrap();
         let t2 = parsing::parse_tree(&CString::new("{a{d}{c}}").unwrap()).unwrap();
-        assert_eq!(
-            label_intersection_distance(&t1, &t2, t1.count() + t2.count()),
-            1
-        )
+        assert_eq!(label_intersection_distance(&t1, &t2), 1)
     }
 }
 

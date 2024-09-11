@@ -3,7 +3,7 @@ use super::{
     errors::NodeError,
     relations::insert_with_neighbors,
     siblings_range::SiblingsRange,
-    traversals::{Ancestors, Descendants, Predecessors, ReverseTraverse, Traverse},
+    traversals::{Ancestors, Children, Descendants, Predecessors, ReverseTraverse, Traverse},
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -24,6 +24,11 @@ impl NodeId {
     /// Returns Ancestors iterator
     pub fn ancestors(self, arena: &TreeArena) -> Ancestors<'_> {
         Ancestors::new(arena, self)
+    }
+
+    /// Returns Ancestors iterator
+    pub fn children(self, arena: &TreeArena) -> Children<'_> {
+        Children::new(arena, self)
     }
 
     /// Returns Descendants iterator

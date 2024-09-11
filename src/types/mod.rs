@@ -1,2 +1,2 @@
 pub mod tree_arena;
-mod tree_internals;
+pub mod tree_internals;
