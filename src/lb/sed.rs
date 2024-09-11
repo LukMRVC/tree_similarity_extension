@@ -1,6 +1,7 @@
 use crate::{types::tree_internals::id::NodeId, TreeArena};
 
-pub fn sed(t1: &SEDIndex, t2: &SEDIndex) -> usize {
+pub fn sed(t1: &TreeArena, t2: &TreeArena) -> usize {
+    let (t1, t2) = (SEDIndex::index_tree(t1), SEDIndex::index_tree(t2));
     let (mut t1, mut t2) = (t1, t2);
     if t1.preorder.len() > t2.preorder.len() {
         (t1, t2) = (t2, t1);
@@ -12,7 +13,8 @@ pub fn sed(t1: &SEDIndex, t2: &SEDIndex) -> usize {
     std::cmp::max(pre_dist, post_dist)
 }
 
-pub fn bounded_sed(t1: &SEDIndex, t2: &SEDIndex, k: usize) -> usize {
+pub fn bounded_sed(t1: &TreeArena, t2: &TreeArena, k: usize) -> usize {
+    let (t1, t2) = (SEDIndex::index_tree(t1), SEDIndex::index_tree(t2));
     if t1.tree_size.abs_diff(t2.tree_size) > k {
         return k + 1;
     }
