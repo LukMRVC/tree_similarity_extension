@@ -4,6 +4,9 @@ use std::ffi::CStr;
 use std::io;
 use thiserror::Error;
 
+pub type LabelId = String;
+pub type ParsedTree = TreeArena;
+
 #[derive(Error, Debug)]
 pub enum TreeParseError {
     #[error("tree string contains non ascii characters")]
