@@ -1,6 +1,7 @@
 use cppffi::tree_ted;
 use cxx::let_cxx_string;
 
+use lb::structural_filter::LabelSetConverter;
 use pgrx::prelude::*;
 
 pgrx::pg_module_magic!();
@@ -12,6 +13,7 @@ mod types;
 use crate::lb::{
     label_intersection::{bounded_label_intersection_distance, label_intersection_distance},
     sed::{bounded_sed, sed},
+    structural_filter::ted as structural_lb,
 };
 use crate::types::tree_arena::TreeArena;
 use types::tree_arena;
@@ -62,6 +64,16 @@ fn tree_lb_sed(t1: TreeArena, t2: TreeArena) -> i32 {
 fn tree_lb_bounded_sed(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
     let lb = bounded_sed(&t1, &t2, lb as usize);
     lb as i32
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn tree_lb_structural_filter(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
+    let mut lsc = LabelSetConverter::default();
+    let tree_tuples = lsc.create(&vec![t1, t2]);
+    match &tree_tuples[..2] {
+        [s1, s2] => structural_lb(s1, s2, lb),
+        _ => panic!("Trees failed to convert!"),
+    }
 }
 
 #[pg_extern]

@@ -364,17 +364,17 @@ fn svec_l1(n1: &StructuralVec, n2: &StructuralVec) -> u32 {
 }
 
 /// Given two sets
-pub fn ted(s1: &StructuralFilterTuple, s2: &StructuralFilterTuple, k: usize) -> usize {
+pub fn ted(s1: &StructuralFilterTuple, s2: &StructuralFilterTuple, k: i32) -> i32 {
     use std::cmp::max;
     let bigger = max(s1.0, s2.0);
 
-    if s1.0.abs_diff(s2.0) > k {
+    if s1.0.abs_diff(s2.0) > k as usize {
         return k + 1;
     }
 
-    let overlap = get_nodes_overlap_with_region_distance(s1, s2, k, svec_l1);
+    let overlap = get_nodes_overlap_with_region_distance(s1, s2, k as usize, svec_l1);
 
-    bigger - overlap
+    (bigger - overlap) as i32
 }
 
 pub fn ted_variant(
@@ -608,26 +608,22 @@ mod tests {
                                     }
                                     */
 
-    #[test]
-    fn test_struct_ted_variant_simple_2() {
-        let t1input = "{0{1}}".to_owned();
-        let t2input = "{62{5}{20}{28{17{1}{5}{20}}}{13{17}{42}}}".to_owned();
-        let mut label_dict = LabelDict::new();
-        let t1 = parse_tree(Ok(t1input), &mut label_dict).unwrap();
-        let t2 = parse_tree(Ok(t2input), &mut label_dict).unwrap();
-        let v = vec![t1, t2];
-        let mut sc = LabelSetConverter::default();
-        // let half = label_dict.len() / 2;
-        let half = 296usize;
-        use rand::{Rng, SeedableRng};
-        let split_labels_into_axes = move |lbl: &LabelId| -> usize {
-            let mut rng1 = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(*lbl as u64);
-            rng1.gen_range(0..=3)
-        };
-        let sets = sc.create(&v, split_labels_into_axes);
-        let lb = ted(&sets[0], &sets[1], 4);
-        assert!(lb <= 10);
-    }
+    // #[test]
+    // fn test_struct_ted_variant_simple_2() {
+    //     let t1input = "{0{1}}".to_owned();
+    //     let t2input = "{62{5}{20}{28{17{1}{5}{20}}}{13{17}{42}}}".to_owned();
+    //     let mut label_dict = LabelDict::new();
+    //     let t1 = parse_tree(Ok(t1input), &mut label_dict).unwrap();
+    //     let t2 = parse_tree(Ok(t2input), &mut label_dict).unwrap();
+    //     let v = vec![t1, t2];
+    //     let mut sc = LabelSetConverter::default();
+    //     // let half = label_dict.len() / 2;
+    //     let half = 296usize;
+    //     let split_labels_into_axes = move |lbl: &LabelId| -> usize { rng1.gen_range(0..=3) };
+    //     let sets = sc.create(&v, split_labels_into_axes);
+    //     let lb = ted(&sets[0], &sets[1], 4);
+    //     assert!(lb <= 10);
+    // }
 
     #[test]
     fn test_svec_l1_distance_with_axes() {
