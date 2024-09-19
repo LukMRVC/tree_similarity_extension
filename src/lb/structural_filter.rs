@@ -5,6 +5,7 @@ use std::cmp::max;
 
 type StructHashMap = FxHashMap<LabelId, LabelSetElement>;
 type SplitStructHashMap = FxHashMap<LabelId, SplitLabelSetElement>;
+type LabelDict = FxHashMap<String, usize>;
 
 type RegionNumType = i32;
 
@@ -483,226 +484,86 @@ fn get_nodes_overlap_with_region_distance(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
+
     use super::*;
-    use crate::parsing::parse_tree; /*
-                                    #[test]
-                                    fn test_axes_set_converting() {
-                                        let t1input = "{1{1}{2{2}{1}{3}}}".to_owned();
-                                        let t2input = "{1{1{1}{2}{1}}{3}}".to_owned();
-                                        let mut label_dict = LabelDict::new();
-                                        let t1 = parse_tree(Ok(t1input), &mut label_dict).unwrap();
-                                        let t2 = parse_tree(Ok(t2input), &mut label_dict).unwrap();
-                                        let v = vec![t1, t2];
-                                        let mut sc = LabelSetConverter::default();
-                                        let half = label_dict.len() - 1 / 2;
-                                        let sets = sc.create(&v, &move |lbl: &LabelId| usize::from(half < (*lbl as usize)));
-                                        assert!(true);
-                                    }
-
-                                    #[test]
-                                    fn test_set_converting() {
-                                        let t1input = "{a{b}{a{b}{c}{a}}{b}}".to_owned();
-                                        let t2input = "{a{c}{b{a{a}{b}{c}}}}".to_owned();
-                                        let mut label_dict = LabelDict::new();
-                                        let t1 = parse_tree(Ok(t1input), &mut label_dict).unwrap();
-                                        let t2 = parse_tree(Ok(t2input), &mut label_dict).unwrap();
-                                        let v = vec![t1, t2];
-                                        let mut sc = LabelSetConverter::default();
-                                        let half = label_dict.len() / 2;
-                                        let sets = sc.create(&v, &move |lbl| usize::from(half < (*lbl as usize)));
-
-                                        // 0 are labels A
-                                        // 1 are labels B
-                                        // 2 are labels C
-
-                                        let lse_for_a = LabelSetElement {
-                                            id: 0,
-                                            weight: 3,
-                                            weigh_so_far: 0,
-                                            struct_vec: vec![
-                                                StructuralVec {
-                                                    label_id: 0,
-                                                    mapping_region_axes: [[3, 2, 1, 0], [0; 4], [0; 4], [0; 4]],
-                                                    postorder_id: 4,
-                                                    preorder_id: 6,
-                                                },
-                                                StructuralVec {
-                                                    label_id: 0,
-                                                    mapping_region_axes: [[1, 1, 1, 3], [0; 4], [0; 4], [0; 4]],
-                                                    postorder_id: 5,
-                                                    preorder_id: 3,
-                                                },
-                                                StructuralVec {
-                                                    label_id: 0,
-                                                    mapping_region_axes: [[0, 0, 0, 6], [0; 4], [0; 4], [0; 4]],
-                                                    postorder_id: 7,
-                                                    preorder_id: 1,
-                                                },
-                                            ],
-                                        };
-
-                                        let lse_for_b = LabelSetElement {
-                                            id: 1,
-                                            weight: 3,
-                                            weigh_so_far: 0,
-                                            struct_vec: vec![
-                                                StructuralVec {
-                                                    label_id: 1,
-                                                    mapping_region_axes: [[0, 1, 5, 0], [0; 4], [0; 4], [0; 4]],
-                                                    postorder_id: 1,
-                                                    preorder_id: 2,
-                                                },
-                                                StructuralVec {
-                                                    label_id: 1,
-                                                    mapping_region_axes: [[1, 2, 3, 0], [0; 4], [0; 4], [0; 4]],
-                                                    postorder_id: 2,
-                                                    preorder_id: 4,
-                                                },
-                                                StructuralVec {
-                                                    label_id: 1,
-                                                    mapping_region_axes: [[5, 1, 0, 0], [0; 4], [0; 4], [0; 4]],
-                                                    postorder_id: 6,
-                                                    preorder_id: 7,
-                                                },
-                                            ],
-                                        };
-
-                                        assert_eq!(sets[0].1.get(&0).unwrap(), &lse_for_a);
-                                        assert_eq!(sets[0].1.get(&1).unwrap(), &lse_for_b);
-
-                                        println!("{}", sets.len());
-                                    }
-
-                                    #[test]
-                                    fn test_struct_ted() {
-                                        let t1input = "{a{b}{a{b}{c}{a}}{b}}".to_owned();
-                                        let t2input = "{a{c}{b{a{a}{b}{c}}}}".to_owned();
-                                        let mut label_dict = LabelDict::new();
-                                        let t1 = parse_tree(Ok(t1input), &mut label_dict).unwrap();
-                                        let t2 = parse_tree(Ok(t2input), &mut label_dict).unwrap();
-                                        let v = vec![t1, t2];
-                                        let half = label_dict.len() / 2;
-                                        let mut sc = LabelSetConverter::default();
-                                        let sets = sc.create(&v, &move |lbl| usize::from(half < (*lbl as usize)));
-
-                                        let lb = ted(&sets[0], &sets[1], 4);
-
-                                        assert_eq!(lb, 2);
-                                    }
-
-
-                                    #[test]
-                                    fn test_struct_ted_variant_simple() {
-                                        let t1input = "{a{b}{a{a{b}{a}{b}}}{b}}".to_owned();
-                                        let t2input = "{a{c}{b{a{a}{b}{b}}}".to_owned();
-                                        let mut label_dict = LabelDict::new();
-                                        let t1 = parse_tree(Ok(t1input), &mut label_dict).unwrap();
-                                        let t2 = parse_tree(Ok(t2input), &mut label_dict).unwrap();
-                                        let v = vec![t1, t2];
-                                        let mut sc = LabelSetConverter::default();
-                                        let half = label_dict.len() / 2;
-                                        let sets = sc.create(&v, &move |lbl| usize::from(half < (*lbl as usize)));
-                                        let lb = ted_variant(&sets[0], &sets[1], 4);
-                                        assert!(lb <= 4);
-                                        assert_eq!(lb, 2);
-                                    }
-                                    */
-
-    // #[test]
-    // fn test_struct_ted_variant_simple_2() {
-    //     let t1input = "{0{1}}".to_owned();
-    //     let t2input = "{62{5}{20}{28{17{1}{5}{20}}}{13{17}{42}}}".to_owned();
-    //     let mut label_dict = LabelDict::new();
-    //     let t1 = parse_tree(Ok(t1input), &mut label_dict).unwrap();
-    //     let t2 = parse_tree(Ok(t2input), &mut label_dict).unwrap();
-    //     let v = vec![t1, t2];
-    //     let mut sc = LabelSetConverter::default();
-    //     // let half = label_dict.len() / 2;
-    //     let half = 296usize;
-    //     let split_labels_into_axes = move |lbl: &LabelId| -> usize { rng1.gen_range(0..=3) };
-    //     let sets = sc.create(&v, split_labels_into_axes);
-    //     let lb = ted(&sets[0], &sets[1], 4);
-    //     assert!(lb <= 10);
-    // }
+    use crate::parsing::parse_tree;
 
     #[test]
-    fn test_svec_l1_distance_with_axes() {
-        let a = StructuralVec {
-            // mapping_region_splits: [[0; 4], [0, 1, 0, 0]],
-            ..Default::default()
+    fn test_set_converting() {
+        let t1input = CString::new("{a{b}{a{b}{c}{a}}{b}}").unwrap();
+        let t2input = CString::new("{a{c}{b{a{a}{b}{c}}}}").unwrap();
+        let t1 = parse_tree(&t1input).unwrap();
+        let t2 = parse_tree(&t2input).unwrap();
+        let v = vec![t1, t2];
+        let mut sc = LabelSetConverter::default();
+        let sets = sc.create(&v);
+        let lse_for_a = LabelSetElement {
+            base: LabelSetElementBase {
+                id: "a".to_string(),
+                weight: 3,
+                weigh_so_far: 0,
+            },
+            struct_vec: vec![
+                StructuralVec {
+                    label_id: "a".to_string(),
+                    mapping_regions: [3, 2, 1, 0],
+                    postorder_id: 4,
+                },
+                StructuralVec {
+                    label_id: "a".to_string(),
+                    mapping_regions: [1, 1, 1, 3],
+                    postorder_id: 5,
+                },
+                StructuralVec {
+                    label_id: "a".to_string(),
+                    mapping_regions: [0, 0, 0, 6],
+                    postorder_id: 7,
+                },
+            ],
         };
-        let b = StructuralVec {
-            // mapping_region_splits: [[0, 0, 0, 1], [0; 4]],
-            ..Default::default()
+
+        let lse_for_b = LabelSetElement {
+            base: LabelSetElementBase {
+                id: "b".to_string(),
+                weight: 3,
+                weigh_so_far: 0,
+            },
+            struct_vec: vec![
+                StructuralVec {
+                    label_id: "b".to_string(),
+                    mapping_regions: [0, 1, 5, 0],
+                    postorder_id: 1,
+                },
+                StructuralVec {
+                    label_id: "b".to_string(),
+                    mapping_regions: [1, 2, 3, 0],
+                    postorder_id: 2,
+                },
+                StructuralVec {
+                    label_id: "b".to_string(),
+                    mapping_regions: [5, 1, 0, 0],
+                    postorder_id: 6,
+                },
+            ],
         };
-        let dist = svec_l1(&a, &b);
-        assert_eq!(dist, 2);
-    }
 
-    /*
-    #[test]
-    fn test_struct_ted_variant() {
-        let t1input = "{20{20{20{1203}{1204}}{20{460}{20{465}{1205}}}}{24}}".to_owned();
-        let t2input = "{0{0{0{118}{0{1456}{251}}}{20{460}{20{537}{1457}}}}{2}}".to_owned();
-        let t3input = "{20{142}{20{20{375}{376}}{2}}}".to_owned();
-        let mut label_dict = LabelDict::new();
-        let t1 = parse_tree(Ok(t1input), &mut label_dict).unwrap();
-        let t2 = parse_tree(Ok(t2input), &mut label_dict).unwrap();
-        let t3 = parse_tree(Ok(t3input), &mut label_dict).unwrap();
-        let v = vec![t1, t2, t3];
-        let half = label_dict.len() / 2;
-        let mut sc = LabelSetConverter::default();
-        let sets = sc.create(&v, &move |lbl| usize::from(half < (*lbl as usize)));
-
-        let lb = ted_variant(&sets[0], &sets[1], 10);
-        assert!(lb <= 10, "T1 and T2 failed");
-        let lb = ted_variant(&sets[0], &sets[2], 10);
-        assert!(lb <= 10, "T2 and T3 failed");
+        assert_eq!(sets[0].1.get("a").unwrap(), &lse_for_a);
+        assert_eq!(sets[0].1.get("b").unwrap(), &lse_for_b);
     }
 
     #[test]
-    fn test_struct_ted_variant_2() {
-        let t1input = "{9{20{20{673}{161}}{20{211}{100}}}{13}}".to_owned();
-        let t2input = "{0{0{0{106}{9{888}{889}}}{20{460}{353}}}{2}} ".to_owned();
-        let mut label_dict = LabelDict::new();
-        let t1 = parse_tree(Ok(t1input), &mut label_dict).unwrap();
-        let t2 = parse_tree(Ok(t2input), &mut label_dict).unwrap();
+    fn test_struct_ted() {
+        let t1input = CString::new("{a{b}{a{b}{c}{a}}{b}}").unwrap();
+        let t2input = CString::new("{a{c}{b{a{a}{b}{c}}}}").unwrap();
+        let t1 = parse_tree(&t1input).unwrap();
+        let t2 = parse_tree(&t2input).unwrap();
         let v = vec![t1, t2];
         let mut sc = LabelSetConverter::default();
-        let half = label_dict.len() / 2;
-        let sets = sc.create(&v, &move |lbl| usize::from(half < (*lbl as usize)));
-        let lb = ted_variant(&sets[0], &sets[1], 10);
-        assert!(lb <= 10);
-    }
+        let sets = sc.create(&v);
 
-    #[test]
-    fn test_struct_ted_variant_3() {
-        let t1input = "{0{0{517}{20{472}{20{518}{519}}}}{24}}".to_owned();
-        let t2input = "{0{0{15}{9{271}{9{9{890}{55}}{98}}}}{2}} ".to_owned();
-        let mut label_dict = LabelDict::new();
-        let t1 = parse_tree(Ok(t1input), &mut label_dict).unwrap();
-        let t2 = parse_tree(Ok(t2input), &mut label_dict).unwrap();
-        let v = vec![t1, t2];
-        let mut sc = LabelSetConverter::default();
-        let half = label_dict.len() / 2;
-        let sets = sc.create(&v, &move |lbl| usize::from(half < (*lbl as usize)));
-        let lb = ted_variant(&sets[0], &sets[1], 10);
-        assert!(lb <= 10);
-    }
+        let lb = ted(&sets[0], &sets[1], 4);
 
-    #[test]
-    fn test_struct_ted_variant_4() {
-        let t1input = "{0{74}{0{75}{2}}}".to_owned();
-        let t2input = "{0{0{9{891}{892}}{20{591}{624}}}{20{591}{893}}} ".to_owned();
-        let mut label_dict = LabelDict::new();
-        let t1 = parse_tree(Ok(t1input), &mut label_dict).unwrap();
-        let t2 = parse_tree(Ok(t2input), &mut label_dict).unwrap();
-        let v = vec![t1, t2];
-        let mut sc = LabelSetConverter::default();
-        let half = label_dict.len() / 2;
-        let sets = sc.create(&v, &move |lbl| usize::from(half < (*lbl as usize)));
-        let lb = ted_variant(&sets[0], &sets[1], 10);
-        assert!(lb <= 10);
+        assert_eq!(lb, 2);
     }
-    */
 }

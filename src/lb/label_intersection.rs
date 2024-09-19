@@ -40,14 +40,17 @@ pub fn bounded_label_intersection_distance(
 
     let mut intersection_size = 0;
 
+    let mut t2_cnt = t2.count();
+
     for n in t2.iter() {
+        t2_cnt -= 1;
         let l = n.get().as_str();
         if t1_label_set.contains(l) {
             intersection_size += 1;
         }
 
-        if bigger_tree - intersection_size < max_distance {
-            return bigger_tree - intersection_size;
+        if bigger_tree - intersection_size - t2_cnt > max_distance {
+            return max_distance + 1;
         }
     }
 
@@ -69,9 +72,9 @@ mod tests {
 
     #[test]
     fn test_bounded_label_intersection_1() {
-        let t1 = crate::parsing::parse_tree(&CString::new("{a{b}{c}}").unwrap()).unwrap();
+        let t1 = crate::parsing::parse_tree(&CString::new("{a{b}{c}{f}}").unwrap()).unwrap();
         let t2 = crate::parsing::parse_tree(&CString::new("{a{d}{e}}").unwrap()).unwrap();
-        assert_eq!(bounded_label_intersection_distance(&t1, &t2, 1), 1)
+        assert_eq!(bounded_label_intersection_distance(&t1, &t2, 1), 2)
     }
 
     #[test]
@@ -79,5 +82,12 @@ mod tests {
         let t1 = crate::parsing::parse_tree(&CString::new("{a{b}{c}}").unwrap()).unwrap();
         let t2 = crate::parsing::parse_tree(&CString::new("{a{d}{e}}").unwrap()).unwrap();
         assert_eq!(bounded_label_intersection_distance(&t1, &t2, 3), 2)
+    }
+
+    #[test]
+    fn test_bounded_label_intersection_3() {
+        let t1 = crate::parsing::parse_tree(&CString::new("{a{b}{e}{f}}").unwrap()).unwrap();
+        let t2 = crate::parsing::parse_tree(&CString::new("{a{d}{e}}").unwrap()).unwrap();
+        assert_eq!(bounded_label_intersection_distance(&t1, &t2, 1), 2)
     }
 }

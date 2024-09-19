@@ -1,5 +1,4 @@
 use cppffi::tree_ted;
-use cxx::let_cxx_string;
 
 use lb::structural_filter::LabelSetConverter;
 use pgrx::prelude::*;
@@ -24,7 +23,7 @@ mod cppffi {
     unsafe extern "C++" {
         include!("tree_similarity_extension/include/apted.h");
 
-        fn tree_ted(a: &CxxString, b: &CxxString) -> u32;
+        fn tree_ted(a: String, b: String) -> u32;
     }
 }
 
@@ -76,27 +75,15 @@ fn tree_lb_structural_filter(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
     }
 }
 
-#[pg_extern]
-fn tree_ed() -> i32 {
-    let_cxx_string!(s1 = "{a{b}{c{h}}}");
-    let_cxx_string!(s2 = "{a{d}{c}{f}}");
-
-    tree_ted(&s1, &s2) as i32
+#[pg_extern(immutable, parallel_safe)]
+fn tree_ed(t1: TreeArena, t2: TreeArena) -> i32 {
+    tree_ted(t1.to_string(), t2.to_string()) as i32
 }
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
-    use super::*;
-    use pgrx::prelude::*;
-    use std::ffi::CString;
-
-    #[pg_test]
-    fn test_label_intersection() {
-        let t1 = parsing::parse_tree(&CString::new("{a{b}{c}}").unwrap()).unwrap();
-        let t2 = parsing::parse_tree(&CString::new("{a{d}{c}}").unwrap()).unwrap();
-        assert_eq!(label_intersection_distance(&t1, &t2), 1)
-    }
+    // TODO: Add postgres tests
 }
 
 /// This module is required by `cargo pgrx test` invocations.
