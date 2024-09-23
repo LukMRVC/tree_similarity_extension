@@ -67,6 +67,9 @@ fn tree_lb_bounded_sed(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
 
 #[pg_extern(immutable, parallel_safe)]
 fn tree_lb_structural_filter(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
+    if t1.count().abs_diff(t2.count()) as i32 > lb {
+        return lb + 1;
+    }
     let mut lsc = LabelSetConverter::default();
     let tree_tuples = lsc.create(&vec![t1, t2]);
     match &tree_tuples[..2] {
@@ -83,7 +86,7 @@ fn lb_structural_filter(t1: StructuralFilterTuple, t2: StructuralFilterTuple, lb
 #[pg_extern(parallel_safe)]
 fn treearena_to_structural_filter_tuple(t1: TreeArena) -> StructuralFilterTuple {
     let mut lsc = LabelSetConverter::default();
-    let tree_tuples = lsc.create(&vec![t1]);
+    let mut tree_tuples = lsc.create(&vec![t1]);
     let Some(t) = tree_tuples.pop() else {
         panic!("Tree failed to convert")
     };
