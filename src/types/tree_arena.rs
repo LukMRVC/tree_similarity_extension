@@ -24,7 +24,7 @@ impl InOutFuncs for TreeArena {
     where
         Self: Sized,
     {
-        parse_tree(input).unwrap()
+        parse_tree(input).expect("failed to parse input tree")
     }
 
     fn output(&self, buffer: &mut pgrx::StringInfo) {

@@ -1,6 +1,4 @@
 use cppffi::tree_ted;
-
-use lb::structural_filter::LabelSetConverter;
 use pgrx::prelude::*;
 
 pgrx::pg_module_magic!();
@@ -15,7 +13,9 @@ use crate::lb::{
     structural_filter::ted as structural_lb,
 };
 use crate::types::tree_arena::TreeArena;
-use types::tree_arena;
+use tree_structural::LabelSetConverter;
+use types::tree_structural;
+use types::{tree_arena, tree_structural::StructuralFilterTuple};
 
 #[cxx::bridge]
 mod cppffi {
@@ -73,6 +73,21 @@ fn tree_lb_structural_filter(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
         [s1, s2] => structural_lb(s1, s2, lb),
         _ => panic!("Trees failed to convert!"),
     }
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn lb_structural_filter(t1: StructuralFilterTuple, t2: StructuralFilterTuple, lb: i32) -> i32 {
+    structural_lb(&t1, &t2, lb)
+}
+
+#[pg_extern(parallel_safe)]
+fn treearena_to_structural_filter_tuple(t1: TreeArena) -> StructuralFilterTuple {
+    let mut lsc = LabelSetConverter::default();
+    let tree_tuples = lsc.create(&vec![t1]);
+    let Some(t) = tree_tuples.pop() else {
+        panic!("Tree failed to convert")
+    };
+    t
 }
 
 #[pg_extern(immutable, parallel_safe)]
