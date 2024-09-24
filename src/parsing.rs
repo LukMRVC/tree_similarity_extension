@@ -1,4 +1,4 @@
-use super::tree_arena::TreeArena;
+use crate::types::TreeArena;
 use memchr::memchr2_iter;
 use std::ffi::CStr;
 use std::io;

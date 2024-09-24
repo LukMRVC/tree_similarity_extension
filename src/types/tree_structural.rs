@@ -56,9 +56,9 @@ pub struct SplitLabelSetElement {
 /// Base struct tuple for structural filter
 #[derive(Clone, Debug, PostgresType, Serialize, Deserialize, PartialEq)]
 #[inoutfuncs]
-pub struct StructuralFilterTuple(pub usize, pub StructHashMap);
+pub struct StructuralFilter(pub usize, pub StructHashMap);
 
-impl InOutFuncs for StructuralFilterTuple {
+impl InOutFuncs for StructuralFilter {
     fn input(input: &core::ffi::CStr) -> Self
     where
         Self: Sized,
@@ -149,7 +149,7 @@ impl LabelSetConverter {
         sets_collection
     }
 
-    pub fn create(&mut self, trees: &[ParsedTree]) -> Vec<StructuralFilterTuple> {
+    pub fn create(&mut self, trees: &[ParsedTree]) -> Vec<StructuralFilter> {
         // add one because range are end exclusive
         // frequency vector of pair (label weight, labelId)
         let mut sets_collection = Vec::with_capacity(trees.len());
@@ -174,7 +174,7 @@ impl LabelSetConverter {
             self.actual_depth[0] = 0;
             self.actual_pre_order_number[0] = 0;
             self.tree_size_by_split_id[0] = 0;
-            sets_collection.push(StructuralFilterTuple(tree.count(), record_labels));
+            sets_collection.push(StructuralFilter(tree.count(), record_labels));
         }
         sets_collection
     }

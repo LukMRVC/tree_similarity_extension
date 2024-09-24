@@ -1,5 +1,5 @@
 use crate::types::tree_structural::{
-    RegionNumType, SplitStructuralFilterTuple, SplitStructuralVec, StructuralFilterTuple,
+    RegionNumType, SplitStructuralFilterTuple, SplitStructuralVec, StructuralFilter,
     StructuralVec,
 };
 
@@ -33,7 +33,7 @@ fn svec_l1(n1: &StructuralVec, n2: &StructuralVec) -> u32 {
 }
 
 /// Given two sets
-pub fn ted(s1: &StructuralFilterTuple, s2: &StructuralFilterTuple, k: i32) -> i32 {
+pub fn ted(s1: &StructuralFilter, s2: &StructuralFilter, k: i32) -> i32 {
     use std::cmp::max;
     let bigger = max(s1.0, s2.0);
 
@@ -100,8 +100,8 @@ pub fn ted_variant(
 }
 
 fn get_nodes_overlap_with_region_distance(
-    s1: &StructuralFilterTuple,
-    s2: &StructuralFilterTuple,
+    s1: &StructuralFilter,
+    s2: &StructuralFilter,
     k: usize,
     region_distance_closure: impl Fn(&StructuralVec, &StructuralVec) -> u32,
 ) -> usize {
@@ -158,7 +158,7 @@ mod tests {
     use crate::parsing::parse_tree;
     use crate::types::tree_structural::{
         LabelSetConverter, LabelSetElement, LabelSetElementBase, SplitStructuralVec,
-        StructuralFilterTuple, StructuralVec,
+        StructuralFilter, StructuralVec,
     };
 
     #[test]

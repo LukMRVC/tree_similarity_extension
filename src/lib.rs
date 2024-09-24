@@ -12,10 +12,8 @@ use crate::lb::{
     sed::{bounded_sed, sed},
     structural_filter::ted as structural_lb,
 };
-use crate::types::tree_arena::TreeArena;
-use tree_structural::LabelSetConverter;
 use types::tree_structural;
-use types::{tree_arena, tree_structural::StructuralFilterTuple};
+use types::{StructuralFilter, StructuralSetConverter, TreeArena};
 
 #[cxx::bridge]
 mod cppffi {
@@ -39,7 +37,6 @@ fn add_node_to_tree_root(mut input_tree: TreeArena, node_value: String) -> TreeA
     input_tree
 }
 
-// TODO: LB filter functions
 #[pg_extern(immutable, parallel_safe)]
 fn tree_lb_label_intersect(t1: TreeArena, t2: TreeArena) -> i32 {
     let lb = label_intersection_distance(&t1, &t2);
@@ -52,7 +49,6 @@ fn tree_lb_bounded_label_intersect(t1: TreeArena, t2: TreeArena, lb: i32) -> i32
     lb as i32
 }
 
-// TODO: LB filter functions
 #[pg_extern(immutable, parallel_safe)]
 fn tree_lb_sed(t1: TreeArena, t2: TreeArena) -> i32 {
     let lb = sed(&t1, &t2);
@@ -70,7 +66,7 @@ fn tree_lb_structural_filter(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
     if t1.count().abs_diff(t2.count()) as i32 > lb {
         return lb + 1;
     }
-    let mut lsc = LabelSetConverter::default();
+    let mut lsc = StructuralSetConverter::default();
     let tree_tuples = lsc.create(&vec![t1, t2]);
     match &tree_tuples[..2] {
         [s1, s2] => structural_lb(s1, s2, lb),
@@ -79,13 +75,13 @@ fn tree_lb_structural_filter(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
 }
 
 #[pg_extern(immutable, parallel_safe)]
-fn lb_structural_filter(t1: StructuralFilterTuple, t2: StructuralFilterTuple, lb: i32) -> i32 {
+fn lb_structural_filter(t1: StructuralFilter, t2: StructuralFilter, lb: i32) -> i32 {
     structural_lb(&t1, &t2, lb)
 }
 
 #[pg_extern(parallel_safe)]
-fn treearena_to_structural_filter_tuple(t1: TreeArena) -> StructuralFilterTuple {
-    let mut lsc = LabelSetConverter::default();
+fn treearena_to_structural_filter_tuple(t1: TreeArena) -> StructuralFilter {
+    let mut lsc = StructuralSetConverter::default();
     let mut tree_tuples = lsc.create(&vec![t1]);
     let Some(t) = tree_tuples.pop() else {
         panic!("Tree failed to convert")
