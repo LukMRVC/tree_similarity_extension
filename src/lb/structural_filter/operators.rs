@@ -35,18 +35,3 @@ fn structuralfilter_contains(left: StructuralFilter, right: StructuralFilter) ->
 fn structuralfilter_overlaps(left: StructuralFilter, right: StructuralFilter) -> bool {
     left.1.keys().any(|k| right.1.contains_key(k))
 }
-
-#[pg_extern]
-fn gin_extract_value_structuralfilter(sft: StructuralFilter) -> Vec<String> {
-    sft.1.keys().cloned().collect::<Vec<String>>()
-}
-
-#[pg_extern]
-fn gin_extract_query_structuralfilter(sft: StructuralFilter) -> Vec<String> {
-    sft.1.keys().cloned().collect::<Vec<String>>()
-}
-
-#[pg_extern]
-fn gin_consistent_structuralfilter(mut check: bool, strategy: StrategyNumber) {
-    todo!("Implement consisten")
-}

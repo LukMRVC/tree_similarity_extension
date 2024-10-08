@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::parsing::{parse_tree, LabelId, ParsedTree};
 
-use super::tree_internals::id::NodeId;
+use super::{tree_internals::id::NodeId, TreeArena};
 
 pub type StructHashMap = FxHashMap<LabelId, LabelSetElement>;
 pub type SplitStructHashMap = FxHashMap<LabelId, SplitLabelSetElement>;
@@ -28,7 +28,7 @@ pub const REGION_DESC_IDX: usize = 3;
 pub struct StructuralVec {
     pub label_id: LabelId,
     /// Id of postorder tree traversal
-    pub postorder_id: usize,
+    pub postorder_id: i32,
     /// Vector of number of nodes to the left, ancestors, nodes to right and descendants
     pub mapping_regions: [RegionNumType; 4],
 }
@@ -64,17 +64,23 @@ impl InOutFuncs for StructuralFilter {
         Self: Sized,
     {
         let tree = parse_tree(input).expect("failed to parse input tree");
-        let mut lsc = LabelSetConverter::default();
-        let mut tmp = lsc.create(&vec![tree]);
-        let Some(sft) = tmp.pop() else {
-            panic!("Unable to convert tree into structural tuple")
-        };
-        sft
+        Self::from(tree)
     }
 
     fn output(&self, buffer: &mut pgrx::StringInfo) {
         let output = serde_json::to_string(self).expect("Failed to serialize");
         buffer.push_str(&output);
+    }
+}
+
+impl From<TreeArena> for StructuralFilter {
+    fn from(value: TreeArena) -> Self {
+        let mut lsc = LabelSetConverter::default();
+        let mut tmp = lsc.create(&vec![value]);
+        let Some(sft) = tmp.pop() else {
+            panic!("Unable to convert tree into structural tuple")
+        };
+        sft
     }
 }
 
@@ -228,7 +234,7 @@ impl LabelSetConverter {
         &mut self,
         root_id: &NodeId,
         tree: &ParsedTree,
-        postorder_id: &mut usize,
+        postorder_id: &mut i32,
         record_labels: &mut SplitStructHashMap,
         split: &mut F,
     ) -> [RegionNumType; Self::MAX_SPLIT]
@@ -310,7 +316,7 @@ impl LabelSetConverter {
         &mut self,
         root_id: &NodeId,
         tree: &ParsedTree,
-        postorder_id: &mut usize,
+        postorder_id: &mut i32,
         record_labels: &mut StructHashMap,
     ) -> RegionNumType {
         // number of children = subtree_size - 1
