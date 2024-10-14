@@ -1,10 +1,9 @@
 use crate::types::tree_structural::{
-    RegionNumType, SplitStructuralFilterTuple, SplitStructuralVec, StructuralFilter,
-    StructuralVec,
+    RegionNumType, SplitStructuralFilterTuple, SplitStructuralVec, StructuralFilter, StructuralVec,
 };
 
 #[inline(always)]
-fn split_svec_l1(n1: &SplitStructuralVec, n2: &SplitStructuralVec) -> u32 {
+fn split_svec_l1(n1: &SplitStructuralVec, n2: &SplitStructuralVec) -> i32 {
     use std::cmp::{max, min};
     // for each axis, take the maximum of L1 difference
     let sum = n1
@@ -21,15 +20,15 @@ fn split_svec_l1(n1: &SplitStructuralVec, n2: &SplitStructuralVec) -> u32 {
                     .map(|(s1, s2)| min(s1, s2))
                     .sum::<RegionNumType>())
         });
-    sum as u32
+    sum as i32
 }
 
 #[inline(always)]
-fn svec_l1(n1: &StructuralVec, n2: &StructuralVec) -> u32 {
+fn svec_l1(n1: &StructuralVec, n2: &StructuralVec) -> i32 {
     n1.mapping_regions
         .iter()
         .zip(n2.mapping_regions.iter())
-        .fold(0, |acc, (a, b)| acc + a.abs_diff(*b))
+        .fold(0, |acc, (a, b)| acc + a.abs_diff(*b)) as i32
 }
 
 /// Given two sets
@@ -56,12 +55,12 @@ pub fn ted_variant(
     }
     let bigger = std::cmp::max(s1.0, s2.0);
     let mut overlap = 0;
-
+    let k = k as i32;
     for (lblid, set1) in s1.1.iter() {
         if let Some(set2) = s2.1.get(lblid) {
             if set1.base.weight == 1 && set2.base.weight == 1 {
                 let l1_region_distance = split_svec_l1(&set1.struct_vec[0], &set2.struct_vec[0]);
-                if l1_region_distance as usize <= k {
+                if l1_region_distance <= k {
                     overlap += 1;
                 }
                 continue;
@@ -74,9 +73,11 @@ pub fn ted_variant(
             };
 
             for n1 in s1c.struct_vec.iter() {
-                let k_window = n1.svec.postorder_id.saturating_sub(k);
+                let mut k_window = n1.svec.postorder_id.saturating_sub(k);
+                k_window = std::cmp::min(k_window, 0);
+
                 // apply postorder filter
-                let s2clen = s2c.struct_vec.len();
+                let s2clen = s2c.struct_vec.len() as i32;
                 for n2 in s2c.struct_vec.iter() {
                     if k_window < s2clen && n2.svec.postorder_id < k_window {
                         continue;
@@ -87,7 +88,7 @@ pub fn ted_variant(
                     }
                     let l1_region_distance = split_svec_l1(n1, n2);
 
-                    if l1_region_distance as usize <= k {
+                    if l1_region_distance <= k {
                         overlap += 1;
                         break;
                     }
@@ -103,16 +104,16 @@ fn get_nodes_overlap_with_region_distance(
     s1: &StructuralFilter,
     s2: &StructuralFilter,
     k: usize,
-    region_distance_closure: impl Fn(&StructuralVec, &StructuralVec) -> u32,
+    region_distance_closure: impl Fn(&StructuralVec, &StructuralVec) -> i32,
 ) -> usize {
     let mut overlap = 0;
-
+    let k = k as i32;
     for (lblid, set1) in s1.1.iter() {
         if let Some(set2) = s2.1.get(lblid) {
             if set1.base.weight == 1 && set2.base.weight == 1 {
                 let l1_region_distance =
                     region_distance_closure(&set1.struct_vec[0], &set2.struct_vec[0]);
-                if l1_region_distance as usize <= k {
+                if l1_region_distance <= k {
                     overlap += 1;
                 }
                 continue;
@@ -125,9 +126,10 @@ fn get_nodes_overlap_with_region_distance(
             };
 
             for n1 in s1c.struct_vec.iter() {
-                let k_window = n1.postorder_id.saturating_sub(k);
+                let mut k_window = n1.postorder_id.saturating_sub(k);
+                k_window = std::cmp::min(k_window, 0);
                 // apply postorder filter
-                let s2clen = s2c.struct_vec.len();
+                let s2clen = s2c.struct_vec.len() as i32;
                 for n2 in s2c.struct_vec.iter() {
                     if k_window < s2clen && n2.postorder_id < k_window {
                         continue;
@@ -138,7 +140,7 @@ fn get_nodes_overlap_with_region_distance(
                     }
                     let l1_region_distance = region_distance_closure(n1, n2);
 
-                    if l1_region_distance as usize <= k {
+                    if l1_region_distance <= k {
                         overlap += 1;
                         break;
                     }
