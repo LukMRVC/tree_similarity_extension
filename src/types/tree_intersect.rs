@@ -5,16 +5,16 @@ use serde::{Deserialize, Serialize};
 
 use super::{tree_internals::id::NodeId, TreeArena};
 use crate::parsing::{parse_tree, LabelId, ParsedTree};
-pub type InvListLblPost = HashMap<LabelId, i32>;
+type InvListLblPost = HashMap<LabelId, i32>;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, PostgresType)]
 #[inoutfuncs]
-pub struct InvertedListLabelPostorderIndex {
+pub struct InvertedTree {
     pub tree_size: usize,
     pub inverted_list: InvListLblPost,
 }
 
-impl InOutFuncs for InvertedListLabelPostorderIndex {
+impl InOutFuncs for InvertedTree {
     fn input(input: &core::ffi::CStr) -> Self
     where
         Self: Sized,
@@ -33,7 +33,7 @@ impl InOutFuncs for InvertedListLabelPostorderIndex {
     }
 }
 
-impl From<TreeArena> for InvertedListLabelPostorderIndex {
+impl From<TreeArena> for InvertedTree {
     fn from(tree: TreeArena) -> Self {
         let mut inverted_list = InvListLblPost::default();
         let Some(root) = tree.iter().next() else {

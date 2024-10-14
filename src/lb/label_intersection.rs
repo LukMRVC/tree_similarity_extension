@@ -1,4 +1,4 @@
-use crate::{types::InvertedListLabelPostorderIndex, TreeArena};
+use crate::{types::InvertedTree, TreeArena};
 use rustc_hash::FxHashSet;
 
 pub fn label_intersection_distance(t1: &TreeArena, t2: &TreeArena) -> usize {
@@ -57,10 +57,7 @@ pub fn bounded_label_intersection_distance(
     bigger_tree - intersection_size
 }
 
-pub fn label_intersection_inverted_distance(
-    t1: &InvertedListLabelPostorderIndex,
-    t2: &InvertedListLabelPostorderIndex,
-) -> i32 {
+pub fn inverted_lblint(t1: &InvertedTree, t2: &InvertedTree) -> i32 {
     use std::cmp::{max, min};
     let mut intersection_size = 0;
     for (label, node_cnt) in t1.inverted_list.iter() {
@@ -72,11 +69,7 @@ pub fn label_intersection_inverted_distance(
     max(t1.tree_size, t2.tree_size) as i32 - intersection_size
 }
 
-pub fn bounded_label_intersection_inverted_distance(
-    t1: &InvertedListLabelPostorderIndex,
-    t2: &InvertedListLabelPostorderIndex,
-    max_distance: usize,
-) -> i32 {
+pub fn inverted_bounded_lblint(t1: &InvertedTree, t2: &InvertedTree, max_distance: usize) -> i32 {
     use std::cmp::{max, min};
     let mut intersection_size = 0;
     let bigger_tree = max(t1.tree_size, t2.tree_size) as i32;

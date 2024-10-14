@@ -9,13 +9,13 @@ mod types;
 
 use crate::lb::{
     label_intersection::{
-        bounded_label_intersection_distance, bounded_label_intersection_inverted_distance,
-        label_intersection_distance, label_intersection_inverted_distance,
+        bounded_label_intersection_distance, inverted_bounded_lblint, inverted_lblint,
+        label_intersection_distance,
     },
     sed::{bounded_sed, sed},
     structural_filter::ted as structural_lb,
 };
-use types::{tree_structural, InvertedListLabelPostorderIndex};
+use types::{tree_structural, InvertedTree};
 use types::{StructuralFilter, StructuralSetConverter, TreeArena};
 
 #[cxx::bridge]
@@ -53,20 +53,13 @@ fn tree_lb_bounded_label_intersect(t1: TreeArena, t2: TreeArena, lb: i32) -> i32
 }
 
 #[pg_extern(immutable, parallel_safe)]
-fn tree_lb_label_intersect_2(
-    t1: InvertedListLabelPostorderIndex,
-    t2: InvertedListLabelPostorderIndex,
-) -> i32 {
-    label_intersection_inverted_distance(&t1, &t2)
+fn inverted_tree_label_intersect(t1: InvertedTree, t2: InvertedTree) -> i32 {
+    inverted_lblint(&t1, &t2)
 }
 
 #[pg_extern(immutable, parallel_safe)]
-fn tree_lb_bounded_label_intersect_2(
-    t1: InvertedListLabelPostorderIndex,
-    t2: InvertedListLabelPostorderIndex,
-    lb: i32,
-) -> i32 {
-    bounded_label_intersection_inverted_distance(&t1, &t2, lb as usize)
+fn inverted_bounded_tree_label_intersect(t1: InvertedTree, t2: InvertedTree, lb: i32) -> i32 {
+    inverted_bounded_lblint(&t1, &t2, lb as usize)
 }
 
 #[pg_extern(immutable, parallel_safe)]
@@ -110,8 +103,8 @@ fn treearena_to_structural_filter_tuple(t1: TreeArena) -> StructuralFilter {
 }
 
 #[pg_extern(immutable, parallel_safe)]
-fn treearena_to_inverted_label_list(t1: TreeArena) -> InvertedListLabelPostorderIndex {
-    InvertedListLabelPostorderIndex::from(t1)
+fn treearena_to_inverted_label_list(t1: TreeArena) -> InvertedTree {
+    InvertedTree::from(t1)
 }
 
 #[pg_extern(immutable, parallel_safe)]
