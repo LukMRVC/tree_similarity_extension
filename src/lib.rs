@@ -8,11 +8,14 @@ mod parsing;
 mod types;
 
 use crate::lb::{
-    label_intersection::{bounded_label_intersection_distance, label_intersection_distance},
+    label_intersection::{
+        bounded_label_intersection_distance, bounded_label_intersection_inverted_distance,
+        label_intersection_distance, label_intersection_inverted_distance,
+    },
     sed::{bounded_sed, sed},
     structural_filter::ted as structural_lb,
 };
-use types::tree_structural;
+use types::{tree_structural, InvertedListLabelPostorderIndex};
 use types::{StructuralFilter, StructuralSetConverter, TreeArena};
 
 #[cxx::bridge]
@@ -47,6 +50,23 @@ fn tree_lb_label_intersect(t1: TreeArena, t2: TreeArena) -> i32 {
 fn tree_lb_bounded_label_intersect(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
     let lb = bounded_label_intersection_distance(&t1, &t2, lb as usize);
     lb as i32
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn tree_lb_label_intersect_2(
+    t1: InvertedListLabelPostorderIndex,
+    t2: InvertedListLabelPostorderIndex,
+) -> i32 {
+    label_intersection_inverted_distance(&t1, &t2)
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn tree_lb_bounded_label_intersect_2(
+    t1: InvertedListLabelPostorderIndex,
+    t2: InvertedListLabelPostorderIndex,
+    lb: i32,
+) -> i32 {
+    bounded_label_intersection_inverted_distance(&t1, &t2, lb as usize)
 }
 
 #[pg_extern(immutable, parallel_safe)]
@@ -87,6 +107,11 @@ fn treearena_to_structural_filter_tuple(t1: TreeArena) -> StructuralFilter {
         panic!("Tree failed to convert")
     };
     t
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn treearena_to_inverted_label_list(t1: TreeArena) -> InvertedListLabelPostorderIndex {
+    InvertedListLabelPostorderIndex::from(t1)
 }
 
 #[pg_extern(immutable, parallel_safe)]
