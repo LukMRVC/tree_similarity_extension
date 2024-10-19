@@ -16,11 +16,10 @@ use crate::lb::{
     structural_filter::ted as structural_lb,
 };
 use types::{tree_structural, InvertedTree};
-use types::{StructuralFilter, StructuralSetConverter, TreeArena};
+use types::{SEDIndex, StructuralFilter, StructuralSetConverter, TreeArena};
 
 #[cxx::bridge]
 mod cppffi {
-
     unsafe extern "C++" {
         include!("tree_similarity_extension/include/apted.h");
 
@@ -59,17 +58,36 @@ fn inverted_tree_label_intersect(t1: InvertedTree, t2: InvertedTree) -> i32 {
 
 #[pg_extern(immutable, parallel_safe)]
 fn inverted_bounded_tree_label_intersect(t1: InvertedTree, t2: InvertedTree, lb: i32) -> i32 {
+    // log!(
+    //     "Running bounded LBL intersect between ts {} and {}",
+    //     t1.tree_size,
+    //     t2.tree_size
+    // );
     inverted_bounded_lblint(&t1, &t2, lb as usize)
 }
 
 #[pg_extern(immutable, parallel_safe)]
 fn tree_lb_sed(t1: TreeArena, t2: TreeArena) -> i32 {
+    let (t1, t2) = (SEDIndex::from(t1), SEDIndex::from(t2));
     let lb = sed(&t1, &t2);
     lb as i32
 }
 
 #[pg_extern(immutable, parallel_safe)]
 fn tree_lb_bounded_sed(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
+    let (t1, t2) = (SEDIndex::from(t1), SEDIndex::from(t2));
+    let lb = bounded_sed(&t1, &t2, lb as usize);
+    lb as i32
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn sed_lb_sed(t1: SEDIndex, t2: SEDIndex) -> i32 {
+    let lb = sed(&t1, &t2);
+    lb as i32
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn sed_lb_bounded_sed(t1: SEDIndex, t2: SEDIndex, lb: i32) -> i32 {
     let lb = bounded_sed(&t1, &t2, lb as usize);
     lb as i32
 }
@@ -92,7 +110,7 @@ fn lb_structural_filter(t1: StructuralFilter, t2: StructuralFilter, lb: i32) -> 
     structural_lb(&t1, &t2, lb)
 }
 
-#[pg_extern(parallel_safe)]
+#[pg_extern(immutable, parallel_safe)]
 fn treearena_to_structural_filter_tuple(t1: TreeArena) -> StructuralFilter {
     let mut lsc = StructuralSetConverter::default();
     let mut tree_tuples = lsc.create(&vec![t1]);
@@ -105,6 +123,11 @@ fn treearena_to_structural_filter_tuple(t1: TreeArena) -> StructuralFilter {
 #[pg_extern(immutable, parallel_safe)]
 fn treearena_to_inverted_label_list(t1: TreeArena) -> InvertedTree {
     InvertedTree::from(t1)
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn treearena_to_sed_index(t1: TreeArena) -> SEDIndex {
+    SEDIndex::from(t1)
 }
 
 #[pg_extern(immutable, parallel_safe)]

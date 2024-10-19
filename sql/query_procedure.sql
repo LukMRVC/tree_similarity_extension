@@ -21,3 +21,11 @@ BEGIN
 raise notice 'time spent=%', clock_timestamp() - t;
 
 END; $$;
+
+-- explain analyze select count(*) 
+-- from inverted_select_ds qsd 
+-- join inverted_ds ds on inverted_bounded_tree_label_intersect(qsd.query_tree, ds.tree, qsd.threshold) <= qsd.threshold;
+
+-- select count(*) 
+-- from sed_select_ds qsd 
+-- join sed_ds ds on sed_lb_bounded_sed(qsd.query_tree, ds.tree, qsd.threshold) <= qsd.threshold;

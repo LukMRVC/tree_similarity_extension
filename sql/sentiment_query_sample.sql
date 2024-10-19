@@ -111,7 +111,10 @@ VALUES
         10,
         '{4{3 Compellingly}{3{3 watchable}{2 .}}}'
     ),
-    (9, '{4{3 Refreshing}{2 .}}'),
+    (
+        9,
+        '{4{3 Refreshing}{2 .}}'
+    ),
     (
         12,
         '{1{1{3{2 The}{2{2 punch}{2 lines}}}{1{2 that}{1 miss}}}{2{2 ,}{1{1 unfortunately}{2{2 ,}{1{2{2{2 outnumber}{2{2 the}{2 hits}}}{2{2 by}{2 three-to-one}}}{2 .}}}}}}'
@@ -664,7 +667,10 @@ VALUES
         10,
         '{2{1{2 If}{1{2 you}{3{2 can}{1{2{2 tolerate}{2{2 the}{2{2 redneck-versus-blueblood}{2 cliches}}}}{2{2 that}{2{2{2 the}{2 film}}{2{2 trades}{2 in}}}}}}}}{2{2 ,}{2{2{3 Sweet}{4{3 Home}{2 Alabama}}}{2{2{2 is}{2{2 diverting}{2{2 in}{2{2{2 the}{2 manner}}{2{2 of}{2{2{2 Jeff}{2{2 Foxworthy}{2 ''s}}}{2{2 stand-up}{2 act}}}}}}}}{2 .}}}}}'
     ),
-    (10, '{1{2 Big}{1{2 mistake}{2 .}}}'),
+    (
+        10,
+        '{1{2 Big}{1{2 mistake}{2 .}}}'
+    ),
     (
         11,
         '{1{1{2{3{3{2 A}{3 hit}}{2 -}}{2{2 and-miss}{1 affair}}}{2 ,}}{2{2{3{3{3{2 consistently}{4 amusing}}{2 but}}{1{1 not}{2{2 as}{3{2{2 outrageous}{2 or}}{3 funny}}}}}{2{2{2{2 as}{2{2 Cho}{2{2 may}{2{2 have}{2 intended}}}}}{2 or}}{3{2 as}{3{2{4 imaginative}{2{2 as}{2 one}}}{2{2 might}{2{2 have}{2 hoped}}}}}}}{2 .}}}'
@@ -810,4 +816,13 @@ create table if not exists inverted_select_ds(
 );
 
 insert into inverted_select_ds select id, threshold, treearena_to_inverted_label_list(query_tree) from tree_select_ds;
+
+
+create table if not exists sed_select_ds(
+    id int ,
+    threshold int,
+    query_tree sedindex
+);
+
+insert into sed_select_ds select id, threshold, treearena_to_sed_index(query_tree) from tree_select_ds;
 

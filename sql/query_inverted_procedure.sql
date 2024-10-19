@@ -6,23 +6,26 @@ DECLARE
 
     c_query CURSOR FOR
     SELECT
+        id,
         threshold,
         query_tree
     FROM
-        inverted_select_ds LIMIT 50;
+        inverted_select_ds
+      order by id;
 
     output_count INT;
+    total_output_cnt INT DEFAULT 0;
 BEGIN
     FOR rowvar in c_query LOOP
         SELECT COUNT(*) INTO output_count
         FROM inverted_ds
         WHERE inverted_bounded_tree_label_intersect(rowvar.query_tree, tree, rowvar.threshold) <= rowvar.threshold;
-
-        raise notice 'Matched trees %', output_count;
-
+        total_output_cnt := total_output_cnt + output_count;
+        raise notice 'Query % matched trees %', rowvar.id, output_count;
     END LOOP;
 
     raise notice 'time spent=%', clock_timestamp() - t;
+    raise notice 'Total trees selected=%', total_output_cnt;
 END; $$;
 
 

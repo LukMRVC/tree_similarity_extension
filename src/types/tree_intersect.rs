@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
+use pgrx::prelude::*;
 use pgrx::{InOutFuncs, PostgresType};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{tree_internals::id::NodeId, TreeArena};
 use crate::parsing::{parse_tree, LabelId, ParsedTree};
@@ -11,6 +12,7 @@ type InvListLblPost = HashMap<LabelId, i32>;
 #[inoutfuncs]
 pub struct InvertedTree {
     pub tree_size: usize,
+    // #[serde(deserialize_with = "des_with_log")]
     pub inverted_list: InvListLblPost,
 }
 
@@ -19,6 +21,7 @@ impl InOutFuncs for InvertedTree {
     where
         Self: Sized,
     {
+        log!("parsing tree into Inverted",);
         Self::from(parse_tree(input).expect("failed to parse input tree"))
     }
 
@@ -35,6 +38,7 @@ impl InOutFuncs for InvertedTree {
 
 impl From<TreeArena> for InvertedTree {
     fn from(tree: TreeArena) -> Self {
+        // log!("parsing tree into Inverted [From]",);
         let mut inverted_list = InvListLblPost::default();
         let Some(root) = tree.iter().next() else {
             panic!("Unable to get root but tree is not empty!");

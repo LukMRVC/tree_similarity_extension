@@ -1,7 +1,9 @@
-use crate::{types::tree_internals::id::NodeId, TreeArena};
+use pgrx::{prelude::*, PostgresType};
+use serde::{Deserialize, Serialize};
 
-pub fn sed(t1: &TreeArena, t2: &TreeArena) -> usize {
-    let (t1, t2) = (SEDIndex::index_tree(t1), SEDIndex::index_tree(t2));
+use crate::{parsing::parse_tree, types::tree_internals::id::NodeId, TreeArena};
+
+pub fn sed(t1: &SEDIndex, t2: &SEDIndex) -> usize {
     let (mut t1, mut t2) = (t1, t2);
     if t1.preorder.len() > t2.preorder.len() {
         (t1, t2) = (t2, t1);
@@ -13,8 +15,7 @@ pub fn sed(t1: &TreeArena, t2: &TreeArena) -> usize {
     std::cmp::max(pre_dist, post_dist)
 }
 
-pub fn bounded_sed(t1: &TreeArena, t2: &TreeArena, k: usize) -> usize {
-    let (t1, t2) = (SEDIndex::index_tree(t1), SEDIndex::index_tree(t2));
+pub fn bounded_sed(t1: &SEDIndex, t2: &SEDIndex, k: usize) -> usize {
     if t1.tree_size.abs_diff(t2.tree_size) > k {
         return k + 1;
     }
@@ -22,7 +23,7 @@ pub fn bounded_sed(t1: &TreeArena, t2: &TreeArena, k: usize) -> usize {
     if t1.preorder.len() > t2.preorder.len() {
         (t1, t2) = (t2, t1);
     }
-
+    let k = k + 1;
     let pre_dist = bounded_string_edit_distance(&t1.preorder, &t2.preorder, k);
     if pre_dist > k {
         return pre_dist;
@@ -32,15 +33,16 @@ pub fn bounded_sed(t1: &TreeArena, t2: &TreeArena, k: usize) -> usize {
     std::cmp::max(pre_dist, post_dist)
 }
 
-#[derive(Debug)]
-struct SEDIndex {
+#[derive(Debug, PostgresType, Serialize, Deserialize)]
+#[inoutfuncs]
+pub struct SEDIndex {
     pub preorder: Vec<String>,
     pub postorder: Vec<String>,
     pub tree_size: usize,
 }
 
 impl SEDIndex {
-    fn index_tree(tree: &TreeArena) -> Self {
+    pub fn index_tree(tree: &TreeArena) -> Self {
         let Some(root) = tree.iter().next() else {
             panic!("Unable to get root but tree is not empty!");
         };
@@ -56,6 +58,27 @@ impl SEDIndex {
             postorder: post,
             preorder: pre,
         }
+    }
+}
+
+impl InOutFuncs for SEDIndex {
+    fn input(input: &core::ffi::CStr) -> Self
+    where
+        Self: Sized,
+    {
+        Self::from(parse_tree(input).expect("failed to parse input tree"))
+    }
+
+    fn output(&self, buffer: &mut pgrx::StringInfo) {
+        buffer.push_str(&self.postorder.join(":"));
+        buffer.push_str(",");
+        buffer.push_str(&self.preorder.join(":"));
+    }
+}
+
+impl From<TreeArena> for SEDIndex {
+    fn from(tree: TreeArena) -> Self {
+        SEDIndex::index_tree(&tree)
     }
 }
 
