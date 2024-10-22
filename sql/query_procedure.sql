@@ -22,10 +22,23 @@ raise notice 'time spent=%', clock_timestamp() - t;
 
 END; $$;
 
--- explain analyze select count(*) 
--- from inverted_select_ds qsd 
--- join inverted_ds ds on inverted_bounded_tree_label_intersect(qsd.query_tree, ds.tree, qsd.threshold) <= qsd.threshold;
+explain analyze select count(*) 
+from inverted_select_ds qsd 
+join inverted_ds ds on inverted_bounded_tree_label_intersect(qsd.query_tree, ds.tree, qsd.threshold) <= qsd.threshold;
+5608.513
 
--- select count(*) 
--- from sed_select_ds qsd 
--- join sed_ds ds on sed_lb_bounded_sed(qsd.query_tree, ds.tree, qsd.threshold) <= qsd.threshold;
+
+select count(*) 
+from sed_select_ds qsd 
+join sed_ds ds on sed_lb_bounded_sed(qsd.query_tree, ds.tree, qsd.threshold) <= qsd.threshold;
+12462.401
+
+select count(*) 
+from inverted_select_ds qsd 
+join inverted_ds ds on inverted_bounded_tree_label_intersect(qsd.query_tree, ds.tree, qsd.threshold) <= qsd.threshold;
+
+
+select count(*) 
+from sf_select_ds qsd 
+join sf_ds ds on lb_structural_filter(qsd.query_tree, ds.tree, qsd.threshold) <= qsd.threshold;
+53650

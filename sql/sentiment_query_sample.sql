@@ -826,3 +826,11 @@ create table if not exists sed_select_ds(
 
 insert into sed_select_ds select id, threshold, treearena_to_sed_index(query_tree) from tree_select_ds;
 
+create table if not exists sf_select_ds(
+    id int ,
+    threshold int,
+    query_tree structuralfilter
+);
+
+insert into sf_select_ds select id, threshold, treearena_to_structural_filter_tuple(query_tree) from tree_select_ds;
+

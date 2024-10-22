@@ -28,21 +28,21 @@ fn svec_l1(n1: &StructuralVec, n2: &StructuralVec) -> i32 {
     n1.mapping_regions
         .iter()
         .zip(n2.mapping_regions.iter())
-        .fold(0, |acc, (a, b)| acc + a.abs_diff(*b)) as i32
+        .fold(0, |acc, (a, b)| acc + (a - b).abs())
 }
 
 /// Given two sets
 pub fn ted(s1: &StructuralFilter, s2: &StructuralFilter, k: i32) -> i32 {
     use std::cmp::max;
-    let bigger = max(s1.0, s2.0);
+    let bigger = max(s1.0, s2.0) as i32;
 
     if s1.0.abs_diff(s2.0) > k as usize {
         return k + 1;
     }
 
-    let overlap = get_nodes_overlap_with_region_distance(s1, s2, k as usize, svec_l1);
+    let overlap = get_nodes_overlap_with_region_distance(s1, s2, k, svec_l1);
 
-    (bigger - overlap) as i32
+    bigger - overlap
 }
 
 pub fn ted_variant(
@@ -103,11 +103,10 @@ pub fn ted_variant(
 fn get_nodes_overlap_with_region_distance(
     s1: &StructuralFilter,
     s2: &StructuralFilter,
-    k: usize,
+    k: i32,
     region_distance_closure: impl Fn(&StructuralVec, &StructuralVec) -> i32,
-) -> usize {
+) -> i32 {
     let mut overlap = 0;
-    let k = k as i32;
     for (lblid, set1) in s1.1.iter() {
         if let Some(set2) = s2.1.get(lblid) {
             if set1.base.weight == 1 && set2.base.weight == 1 {
@@ -127,7 +126,7 @@ fn get_nodes_overlap_with_region_distance(
 
             for n1 in s1c.struct_vec.iter() {
                 let mut k_window = n1.postorder_id.saturating_sub(k);
-                k_window = std::cmp::min(k_window, 0);
+                k_window = std::cmp::max(k_window, 0);
                 // apply postorder filter
                 let s2clen = s2c.struct_vec.len() as i32;
                 for n2 in s2c.struct_vec.iter() {
