@@ -12,11 +12,14 @@ use crate::lb::{
         bounded_label_intersection_distance, inverted_bounded_lblint, inverted_lblint,
         label_intersection_distance,
     },
-    sed::{bounded_sed, sed},
+    sed::{
+        bounded_sed, bounded_sed_opt, bounded_sed_opt_int, bounded_sed_struct,
+        bounded_sed_struct_int, build_sed_indices_int, build_sed_struct_indices_int, sed,
+    },
     structural_filter::ted as structural_lb,
 };
 use types::{tree_structural, InvertedTree};
-use types::{SEDIndex, StructuralFilter, StructuralSetConverter, TreeArena};
+use types::{SEDIndex, SEDStructIndex, StructuralFilter, StructuralSetConverter, TreeArena};
 
 #[cxx::bridge]
 mod cppffi {
@@ -39,24 +42,24 @@ fn add_node_to_tree_root(mut input_tree: TreeArena, node_value: String) -> TreeA
     input_tree
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 1000)]
 fn tree_lb_label_intersect(t1: TreeArena, t2: TreeArena) -> i32 {
     let lb = label_intersection_distance(&t1, &t2);
     lb as i32
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 1000)]
 fn tree_lb_bounded_label_intersect(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
     let lb = bounded_label_intersection_distance(&t1, &t2, lb as usize);
     lb as i32
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 1000)]
 fn inverted_tree_label_intersect(t1: InvertedTree, t2: InvertedTree) -> i32 {
     inverted_lblint(&t1, &t2)
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 1000)]
 fn inverted_bounded_tree_label_intersect(t1: InvertedTree, t2: InvertedTree, lb: i32) -> i32 {
     // log!(
     //     "Running bounded LBL intersect between ts {} and {}",
@@ -66,33 +69,104 @@ fn inverted_bounded_tree_label_intersect(t1: InvertedTree, t2: InvertedTree, lb:
     inverted_bounded_lblint(&t1, &t2, lb as usize)
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 1500)]
 fn tree_lb_sed(t1: TreeArena, t2: TreeArena) -> i32 {
     let (t1, t2) = (SEDIndex::from(t1), SEDIndex::from(t2));
     let lb = sed(&t1, &t2);
     lb as i32
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 1500)]
 fn tree_lb_bounded_sed(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
+    let bound = lb as usize;
+
+    let t_idx = std::time::Instant::now();
     let (t1, t2) = (SEDIndex::from(t1), SEDIndex::from(t2));
-    let lb = bounded_sed(&t1, &t2, lb as usize);
-    lb as i32
+    let idx_ns = t_idx.elapsed().as_nanos();
+
+    let t_sed = std::time::Instant::now();
+    let result = bounded_sed(&t1, &t2, bound);
+    let sed_ns = t_sed.elapsed().as_nanos();
+
+    debug2!(
+        "tree_lb_bounded_sed: sizes={}/{} bound={} result={} | SEDIndex::from={}ns bounded_sed={}ns total={}ns",
+        t1.tree_size,
+        t2.tree_size,
+        bound,
+        result,
+        idx_ns,
+        sed_ns,
+        idx_ns + sed_ns
+    );
+    result as i32
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 1000)]
 fn sed_lb_sed(t1: SEDIndex, t2: SEDIndex) -> i32 {
     let lb = sed(&t1, &t2);
     lb as i32
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 1000)]
 fn sed_lb_bounded_sed(t1: SEDIndex, t2: SEDIndex, lb: i32) -> i32 {
     let lb = bounded_sed(&t1, &t2, lb as usize);
     lb as i32
 }
 
-#[pg_extern(immutable, parallel_safe)]
+// ---------------------------------------------------------------------------
+// Optimized bounded SED (budget-constrained band)
+// ---------------------------------------------------------------------------
+
+#[pg_extern(immutable, parallel_safe, cost = 1500)]
+fn tree_lb_bounded_sed_opt(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
+    let (t1, t2) = (SEDIndex::from(t1), SEDIndex::from(t2));
+    bounded_sed_opt(&t1, &t2, lb as usize) as i32
+}
+
+#[pg_extern(immutable, parallel_safe, cost = 1000)]
+fn sed_lb_bounded_sed_opt(t1: SEDIndex, t2: SEDIndex, lb: i32) -> i32 {
+    bounded_sed_opt(&t1, &t2, lb as usize) as i32
+}
+
+// ---------------------------------------------------------------------------
+// SED-STRUCT — bounded SED with structural pruning (sum/diff per node)
+// ---------------------------------------------------------------------------
+
+#[pg_extern(immutable, parallel_safe, cost = 2000)]
+fn tree_lb_bounded_sed_struct(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
+    let (t1, t2) = (SEDStructIndex::from(t1), SEDStructIndex::from(t2));
+    bounded_sed_struct(&t1, &t2, lb as usize) as i32
+}
+
+#[pg_extern(immutable, parallel_safe, cost = 1500)]
+fn sed_struct_lb_bounded(t1: SEDStructIndex, t2: SEDStructIndex, lb: i32) -> i32 {
+    bounded_sed_struct(&t1, &t2, lb as usize) as i32
+}
+
+#[pg_extern(immutable, parallel_safe, cost = 500)]
+fn treearena_to_sed_struct_index(t1: TreeArena) -> SEDStructIndex {
+    SEDStructIndex::from(t1)
+}
+
+// ---------------------------------------------------------------------------
+// Integer-interned variants — build a local label→i32 dictionary from the two
+// input trees, then compute bounded SED / SED-STRUCT on i32 slices. i32
+// PartialEq is much cheaper than String::eq in the inner DP loop.
+// ---------------------------------------------------------------------------
+
+#[pg_extern(immutable, parallel_safe, cost = 1500)]
+fn tree_lb_bounded_sed_int(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
+    let (i1, i2) = build_sed_indices_int(&t1, &t2);
+    bounded_sed_opt_int(&i1, &i2, lb as usize) as i32
+}
+
+#[pg_extern(immutable, parallel_safe, cost = 2000)]
+fn tree_lb_bounded_sed_struct_int(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
+    let (i1, i2) = build_sed_struct_indices_int(&t1, &t2);
+    bounded_sed_struct_int(&i1, &i2, lb as usize) as i32
+}
+
+#[pg_extern(immutable, parallel_safe, cost = 1500)]
 fn tree_lb_structural_filter(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
     if t1.count().abs_diff(t2.count()) as i32 > lb {
         return lb + 1;
@@ -105,12 +179,12 @@ fn tree_lb_structural_filter(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
     }
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 1000)]
 fn lb_structural_filter(t1: StructuralFilter, t2: StructuralFilter, lb: i32) -> i32 {
     structural_lb(&t1, &t2, lb)
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 500)]
 fn treearena_to_structural_filter_tuple(t1: TreeArena) -> StructuralFilter {
     let mut lsc = StructuralSetConverter::default();
     let mut tree_tuples = lsc.create(&vec![t1]);
@@ -120,17 +194,17 @@ fn treearena_to_structural_filter_tuple(t1: TreeArena) -> StructuralFilter {
     t
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 500)]
 fn treearena_to_inverted_label_list(t1: TreeArena) -> InvertedTree {
     InvertedTree::from(t1)
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 500)]
 fn treearena_to_sed_index(t1: TreeArena) -> SEDIndex {
     SEDIndex::from(t1)
 }
 
-#[pg_extern(immutable, parallel_safe)]
+#[pg_extern(immutable, parallel_safe, cost = 5000)]
 fn tree_ed(t1: TreeArena, t2: TreeArena) -> i32 {
     tree_ted(t1.to_string(), t2.to_string()) as i32
 }
