@@ -4,3 +4,6 @@
 *.iml
 **/*.rs.bk
 # Cargo.lock
+
+# Git worktrees
+/.worktrees/
