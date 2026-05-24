@@ -128,10 +128,13 @@ impl UnifiedTreeIndex {
 
         // Compute depths top-down (root = n-1, depth 0).
         let mut depth: Vec<i32> = vec![0; n];
+        // Collect preorder sequence here (reused for both SED and TopDiff).
+        let mut preorder_nodes: Vec<usize> = Vec::with_capacity(n);
         {
             let mut dfs_stack: Vec<(usize, i32)> = vec![(n - 1, 0)];
             while let Some((node, d)) = dfs_stack.pop() {
                 depth[node] = d;
+                preorder_nodes.push(node);
                 for &c in children[node].iter().rev() {
                     dfs_stack.push((c, d + 1));
                 }
@@ -155,18 +158,6 @@ impl UnifiedTreeIndex {
         // CRITICAL: intern labels in preorder visit order (same as
         // traverse_with_info_int, which descends into each node before children).
         // ------------------------------------------------------------------
-
-        // Collect preorder sequence (root first, left→right children).
-        let mut preorder_nodes: Vec<usize> = Vec::with_capacity(n);
-        {
-            let mut dfs_stack: Vec<usize> = vec![n - 1];
-            while let Some(node) = dfs_stack.pop() {
-                preorder_nodes.push(node);
-                for &c in children[node].iter().rev() {
-                    dfs_stack.push(c);
-                }
-            }
-        }
 
         // Intern labels in preorder order.
         let mut label_ids: Vec<i32> = vec![0; n];
@@ -210,25 +201,69 @@ impl UnifiedTreeIndex {
         };
 
         // ------------------------------------------------------------------
-        // Step 3: Build TopDiffIndex (stub — TopDiff half implemented in B3).
+        // Step 3: Build TopDiffIndex.
+        //
+        // INVARIANTS (from topdiff.rs):
+        //   * labels interned to i32 against shared dict  (done above)
+        //   * postl_to_size: subtree node count; leaf == 1
+        //   * postl_to_depth: root depth == 0
+        //   * postl_to_lch: leftmost-child postorder id; LEAF == -1
+        //   * list_kr: non-first children + root (order irrelevant)
+        //   * postl_to_kr_ancestor: nearest keyroot ancestor postorder id
         // ------------------------------------------------------------------
 
-        let topdiff = build_topdiff_stub(n);
+        // postl_to_size and postl_to_depth are directly available.
+        let postl_to_label_id = label_ids.clone();
+        let postl_to_size: Vec<i32> = self.sizes.clone();
+        let postl_to_depth = depth.clone();
+
+        // postl_to_lch: for each node, postorder id of its leftmost child (or -1).
+        let postl_to_lch: Vec<i32> = (0..n)
+            .map(|i| children[i].first().map(|&c| c as i32).unwrap_or(-1))
+            .collect();
+
+        // is_keyroot: root + non-first children.
+        let mut is_keyroot: Vec<bool> = vec![false; n];
+        is_keyroot[n - 1] = true;
+        for i in 0..n {
+            for &c in children[i].iter().skip(1) {
+                is_keyroot[c] = true;
+            }
+        }
+
+        // list_kr: non-first children + root.
+        let mut list_kr: Vec<i32> = vec![(n - 1) as i32]; // root
+        for i in 0..n {
+            for &c in children[i].iter().skip(1) {
+                list_kr.push(c as i32);
+            }
+        }
+
+        // postl_to_kr_ancestor: nearest keyroot ancestor (including self).
+        // Process top-down (preorder) so parent's kr_ancestor is ready first.
+        let mut postl_to_kr_ancestor: Vec<i32> = vec![-1; n];
+        for &node in &preorder_nodes {
+            if is_keyroot[node] {
+                postl_to_kr_ancestor[node] = node as i32;
+            } else {
+                let p = parent[node];
+                if p >= 0 {
+                    postl_to_kr_ancestor[node] = postl_to_kr_ancestor[p as usize];
+                }
+            }
+        }
+
+        let topdiff = TopDiffIndex {
+            tree_size: n as i32,
+            postl_to_label_id,
+            postl_to_size,
+            postl_to_depth,
+            postl_to_lch,
+            postl_to_kr_ancestor,
+            list_kr,
+        };
 
         (sed_index, topdiff)
-    }
-}
-
-/// Temporary stub for the TopDiff half (replaced in B3).
-fn build_topdiff_stub(n: usize) -> TopDiffIndex {
-    TopDiffIndex {
-        tree_size: n as i32,
-        postl_to_label_id: vec![0; n],
-        postl_to_size: vec![0; n],
-        postl_to_depth: vec![0; n],
-        postl_to_lch: vec![-1; n],
-        postl_to_kr_ancestor: vec![-1; n],
-        list_kr: Vec::new(),
     }
 }
 
@@ -251,6 +286,7 @@ fn intern_local(dict: &mut LabelDict, label: &str) -> i32 {
 mod tests {
     use super::*;
     use crate::lb::sed::bounded_sed_struct_int;
+    use crate::lb::topdiff::TopDiffIndex;
     use rustc_hash::FxHashMap;
 
     fn pt(s: &str) -> TreeArena {
@@ -292,5 +328,173 @@ mod tests {
             bounded_sed_struct_int(&sed1, &sed2, 10),
             bounded_sed_struct_int(&ref1, &ref2, 10)
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // B3: expand TopDiff half matches reference builder (the contract seam).
+    //
+    // The reference builder is duplicated here for differential testing; it
+    // will be reconciled with Track A's TopDiffIndex::from_tree at integration.
+    // -----------------------------------------------------------------------
+
+    /// Reference TopDiffIndex builder direct from a TreeArena, honoring all
+    /// TopDiffIndex invariants. Labels interned in preorder order to match expand.
+    fn reference_topdiff_index(tree: &TreeArena, dict: &mut LabelDict) -> TopDiffIndex {
+        let n = tree.count();
+
+        let root = tree.iter().next().expect("tree non-empty");
+        let root_id = tree.get_node_id(root).unwrap();
+
+        // Postorder numbering.
+        let mut postorder: Vec<NodeId> = Vec::with_capacity(n);
+        collect_postorder_ids(root_id, tree, &mut postorder);
+
+        use std::collections::HashMap;
+        let mut nid_to_postl: HashMap<NodeId, usize> = HashMap::with_capacity(n);
+        for (i, &nid) in postorder.iter().enumerate() {
+            nid_to_postl.insert(nid, i);
+        }
+
+        // Preorder ids (needed for depth and label interning order).
+        let mut preorder_ids: Vec<NodeId> = Vec::with_capacity(n);
+        collect_preorder_ids(root_id, tree, &mut preorder_ids);
+
+        // Depth top-down (root = 0).
+        let mut postl_to_depth: Vec<i32> = vec![0; n];
+        {
+            let mut dfs: Vec<(NodeId, i32)> = vec![(root_id, 0)];
+            while let Some((nid, d)) = dfs.pop() {
+                postl_to_depth[nid_to_postl[&nid]] = d;
+                let node = tree.get(nid).unwrap();
+                let mut ch: Vec<NodeId> = Vec::new();
+                let mut cur = node.first_child;
+                while let Some(c) = cur {
+                    ch.push(c);
+                    cur = tree.get(c).unwrap().next_sibling;
+                }
+                for c in ch.into_iter().rev() {
+                    dfs.push((c, d + 1));
+                }
+            }
+        }
+
+        // Intern labels in preorder order (mirrors expand).
+        let mut postl_to_label_id: Vec<i32> = vec![0; n];
+        for &nid in &preorder_ids {
+            let label = tree.get(nid).unwrap().get();
+            let id = intern_local(dict, label);
+            postl_to_label_id[nid_to_postl[&nid]] = id;
+        }
+
+        let mut postl_to_size: Vec<i32> = Vec::with_capacity(n);
+        let mut postl_to_lch: Vec<i32> = Vec::with_capacity(n);
+
+        for &nid in &postorder {
+            // descendants() includes self → subtree size.
+            let subtree_sz = nid.descendants(tree).count() as i32;
+            postl_to_size.push(subtree_sz);
+
+            let fc = tree.get(nid).unwrap().first_child;
+            let lch = fc.map(|c| nid_to_postl[&c] as i32).unwrap_or(-1);
+            postl_to_lch.push(lch);
+        }
+
+        // is_keyroot: root + non-first children.
+        let mut is_keyroot: Vec<bool> = vec![false; n];
+        is_keyroot[n - 1] = true;
+        for &nid in &postorder {
+            let node = tree.get(nid).unwrap();
+            let mut first = true;
+            let mut cur = node.first_child;
+            while let Some(c) = cur {
+                if !first {
+                    is_keyroot[nid_to_postl[&c]] = true;
+                }
+                first = false;
+                cur = tree.get(c).unwrap().next_sibling;
+            }
+        }
+
+        // list_kr: non-first children + root.
+        let mut list_kr: Vec<i32> = vec![(n - 1) as i32];
+        for &nid in &postorder {
+            let node = tree.get(nid).unwrap();
+            let mut first = true;
+            let mut cur = node.first_child;
+            while let Some(c) = cur {
+                if !first {
+                    list_kr.push(nid_to_postl[&c] as i32);
+                }
+                first = false;
+                cur = tree.get(c).unwrap().next_sibling;
+            }
+        }
+
+        // postl_to_kr_ancestor in preorder.
+        let mut postl_to_kr_ancestor: Vec<i32> = vec![-1; n];
+        for &nid in &preorder_ids {
+            let postl = nid_to_postl[&nid];
+            if is_keyroot[postl] {
+                postl_to_kr_ancestor[postl] = postl as i32;
+            } else {
+                let par = tree.get(nid).unwrap().parent;
+                if let Some(par_id) = par {
+                    let par_postl = nid_to_postl[&par_id];
+                    postl_to_kr_ancestor[postl] = postl_to_kr_ancestor[par_postl];
+                }
+            }
+        }
+
+        TopDiffIndex {
+            tree_size: n as i32,
+            postl_to_label_id,
+            postl_to_size,
+            postl_to_depth,
+            postl_to_lch,
+            postl_to_kr_ancestor,
+            list_kr,
+        }
+    }
+
+    fn collect_postorder_ids(nid: NodeId, tree: &TreeArena, out: &mut Vec<NodeId>) {
+        for c in nid.children(tree) {
+            collect_postorder_ids(c, tree, out);
+        }
+        out.push(nid);
+    }
+
+    fn collect_preorder_ids(nid: NodeId, tree: &TreeArena, out: &mut Vec<NodeId>) {
+        out.push(nid);
+        for c in nid.children(tree) {
+            collect_preorder_ids(c, tree, out);
+        }
+    }
+
+    #[test]
+    fn expand_topdiff_matches_reference() {
+        for s in &["{a}", "{a{b}{c}}", "{a{b{d}}{c}}"] {
+            let t = pt(s);
+
+            let mut d1: LabelDict = FxHashMap::default();
+            let ref_td = reference_topdiff_index(&t, &mut d1);
+
+            let mut d2: LabelDict = FxHashMap::default();
+            let u = UnifiedTreeIndex::from(t);
+            let (_sed, td) = u.expand(&mut d2);
+
+            assert_eq!(td.tree_size, ref_td.tree_size, "tree_size mismatch for {}", s);
+            assert_eq!(td.postl_to_label_id, ref_td.postl_to_label_id, "label_id mismatch for {}", s);
+            assert_eq!(td.postl_to_size, ref_td.postl_to_size, "size mismatch for {}", s);
+            assert_eq!(td.postl_to_depth, ref_td.postl_to_depth, "depth mismatch for {}", s);
+            assert_eq!(td.postl_to_lch, ref_td.postl_to_lch, "lch mismatch for {}", s);
+            assert_eq!(td.postl_to_kr_ancestor, ref_td.postl_to_kr_ancestor, "kr_ancestor mismatch for {}", s);
+
+            // list_kr: order irrelevant; compare as sorted sets.
+            let mut got = td.list_kr.clone();
+            let mut exp = ref_td.list_kr.clone();
+            got.sort();
+            exp.sort();
+            assert_eq!(got, exp, "list_kr mismatch for {}", s);
+        }
     }
 }
