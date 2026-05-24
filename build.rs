@@ -1,11 +1,13 @@
 fn main() {
     cxx_build::bridge("src/lib.rs")
         .file("src_cpp/apted.cpp")
+        .file("src_cpp/topdiff.cpp")
         .file("src_cpp/string_label_impl.cpp")
         .file("src_cpp/node_impl.cpp")
         .file("src_cpp/tree_indexer_impl.cpp")
         .file("src_cpp/label_dictionary_impl.cpp")
         .file("src_cpp/apted_tree_index_impl.cpp")
+        .file("src_cpp/touzet_kr_set_tree_index_impl.cpp")
         .file("src_cpp/unit_cost_model_impl.cpp")
         .file("src_cpp/bracket_notation_parser_impl.cpp")
         .flag_if_supported("-std=c++17")
@@ -13,17 +15,22 @@ fn main() {
 
     println!("cargo:rerun-if-changed=src/main.rs");
     println!("cargo:rerun-if-changed=src_cpp/apted.cpp");
+    println!("cargo:rerun-if-changed=src_cpp/topdiff.cpp");
     println!("cargo:rerun-if-changed=src_cpp/string_label_impl.cpp");
     println!("cargo:rerun-if-changed=src_cpp/tree_indexer_impl.cpp");
     println!("cargo:rerun-if-changed=src_cpp/apted_tree_index_impl.cpp");
+    println!("cargo:rerun-if-changed=src_cpp/touzet_kr_set_tree_index_impl.cpp");
     println!("cargo:rerun-if-changed=src_cpp/node_impl.cpp");
     println!("cargo:rerun-if-changed=src_cpp/label_dictionary_impl.cpp");
     println!("cargo:rerun-if-changed=src_cpp/unit_cost_model_impl.cpp");
     println!("cargo:rerun-if-changed=src_cpp/bracket_notation_parser_impl.cpp");
     println!("cargo:rerun-if-changed=include/apted.h");
+    println!("cargo:rerun-if-changed=include/topdiff.h");
     println!("cargo:rerun-if-changed=include/string_label.h");
     println!("cargo:rerun-if-changed=include/tree_indexer.h");
     println!("cargo:rerun-if-changed=include/apted_tree_index.h");
+    println!("cargo:rerun-if-changed=include/ted_algorithm_touzet.h");
+    println!("cargo:rerun-if-changed=include/touzet_kr_set_tree_index.h");
     println!("cargo:rerun-if-changed=include/node.h");
     println!("cargo:rerun-if-changed=include/label_dictionary.h");
     println!("cargo:rerun-if-changed=include/unit_cost_model.h");

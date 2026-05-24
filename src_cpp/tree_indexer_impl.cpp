@@ -250,6 +250,10 @@ namespace node
       TreeIndexAPTED &ti, const Node<label::StringLabel> &n,
       label::LabelDictionary<label::StringLabel> &ld, const cost_model::UnitCostModelLD<label::StringLabel> &cm);
 
+  template void index_tree<TreeIndexTouzetKRSet, label::StringLabel, cost_model::UnitCostModelLD<label::StringLabel>>(
+      TreeIndexTouzetKRSet &ti, const Node<label::StringLabel> &n,
+      label::LabelDictionary<label::StringLabel> &ld, const cost_model::UnitCostModelLD<label::StringLabel> &cm);
+
   template <typename TreeIndex, typename Label, typename CostModel>
   int index_tree_recursion(TreeIndex &ti, const node::Node<Label> &n,
                            label::LabelDictionary<Label> &ld, const CostModel &cm,

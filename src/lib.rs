@@ -1,4 +1,4 @@
-use cppffi::tree_ted;
+use cppffi::{tree_ted, tree_topdiff_bounded};
 use pgrx::prelude::*;
 
 pgrx::pg_module_magic!();
@@ -25,8 +25,10 @@ use types::{SEDIndex, SEDStructIndex, StructuralFilter, StructuralSetConverter, 
 mod cppffi {
     unsafe extern "C++" {
         include!("tree_similarity_extension/include/apted.h");
+        include!("tree_similarity_extension/include/topdiff.h");
 
         fn tree_ted(a: String, b: String) -> u32;
+        fn tree_topdiff_bounded(a: String, b: String, k: i32) -> u32;
     }
 }
 
@@ -209,10 +211,116 @@ fn tree_ed(t1: TreeArena, t2: TreeArena) -> i32 {
     tree_ted(t1.to_string(), t2.to_string()) as i32
 }
 
+/// Bounded TopDiff (Touzet KR-set) tree edit distance. Returns the exact TED
+/// when it is <= k, otherwise k+1 (over-bound), mirroring the other bounded LBs.
+#[pg_extern(immutable, parallel_safe, cost = 5000)]
+fn tree_topdiff_bounded_ed(t1: TreeArena, t2: TreeArena, k: i32) -> i32 {
+    tree_topdiff_bounded(t1.to_string(), t2.to_string(), k) as i32
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
     // TODO: Add postgres tests
+}
+
+// ---------------------------------------------------------------------------
+// Benchmarks (cargo pgrx bench) — gated behind the `pg_bench` feature.
+//
+// Compares the two SED-STRUCT bounded LB implementations head-to-head:
+//   * tree_lb_bounded_sed_struct      — String-labelled SEDStructIndex path
+//   * tree_lb_bounded_sed_struct_int  — i32-interned SEDStructIndexInt path
+//
+// The timed closure mirrors the body of each #[pg_extern] wrapper exactly
+// (index build + bounded DP). Parsing the bracket string into a TreeArena is
+// done in the *untimed* `iter_batched` setup — that step is the CBOR decode in
+// real SQL and is identical for both, so excluding it isolates the difference.
+// Each call gets a fresh TreeArena pair because `SEDStructIndex::from` consumes
+// its input.
+// ---------------------------------------------------------------------------
+#[cfg(feature = "pg_bench")]
+#[pg_schema]
+mod benches {
+    use pgrx::prelude::*;
+    use pgrx_bench::{black_box, BatchSize, Bencher};
+
+    use crate::lb::sed::{bounded_sed_struct, bounded_sed_struct_int, build_sed_struct_indices_int};
+    use crate::parsing::parse_tree;
+    use crate::types::{SEDStructIndex, TreeArena};
+    use std::ffi::CString;
+
+    // Two representative sentiment-treebank trees taken verbatim from trees.sql.
+    const QUERY_TREE: &str = "{1{2 Something}{0{1{2 has}{1{2 been}{0{2 lost}{1{2 in}{0{2{2{2 the}{2 translation}}{2 ...}}{1{1{2 another}{2{2 routine}{1{2 Hollywood}{3 frightfest}}}}{1{2{2 in}{2 which}}{1{2{2 the}{1{2 slack}{2 execution}}}{2{2 italicizes}{1{1{2 the}{1 absurdity}}{2{2 of}{2{2 the}{2 premise}}}}}}}}}}}}}{2 .}}}";
+    const DATA_TREE: &str = "{3{2{2 The}{1{2 dirty}{2 jokes}}}{3{4{2 provide}{3{3{2 the}{3{4 funniest}{2 moments}}}{3{2 in}{3{3{2 this}{3{3{2 oddly}{4 sweet}}{3 comedy}}}{2{2 about}{3{2 jokester}{2{2 highway}{2 patrolmen}}}}}}}}{2 .}}}";
+
+    // Realistic edit-distance threshold (matches the dataset's thresholds, ~9-12).
+    const K_REALISTIC: usize = 11;
+    // Large threshold: defeats early short-circuits so the full DP runs and the
+    // i32-vs-String inner-loop comparison cost dominates.
+    const K_LARGE: usize = 500;
+
+    /// Parse the embedded bracket strings into a fresh `TreeArena` pair.
+    /// Runs in untimed setup, so its cost is excluded from the measurement.
+    fn parse_pair() -> (TreeArena, TreeArena) {
+        let q = CString::new(QUERY_TREE).unwrap();
+        let d = CString::new(DATA_TREE).unwrap();
+        (
+            parse_tree(q.as_c_str()).unwrap(),
+            parse_tree(d.as_c_str()).unwrap(),
+        )
+    }
+
+    // --- realistic threshold ------------------------------------------------
+
+    #[pg_bench]
+    fn bench_sed_struct_realistic(b: &mut Bencher) {
+        b.iter_batched(
+            parse_pair,
+            |(t1, t2)| {
+                let (a, b) = (SEDStructIndex::from(t1), SEDStructIndex::from(t2));
+                black_box(bounded_sed_struct(&a, &b, K_REALISTIC))
+            },
+            BatchSize::SmallInput,
+        );
+    }
+
+    #[pg_bench]
+    fn bench_sed_struct_int_realistic(b: &mut Bencher) {
+        b.iter_batched(
+            parse_pair,
+            |(t1, t2)| {
+                let (i1, i2) = build_sed_struct_indices_int(&t1, &t2);
+                black_box(bounded_sed_struct_int(&i1, &i2, K_REALISTIC))
+            },
+            BatchSize::SmallInput,
+        );
+    }
+
+    // --- large threshold (full DP) ------------------------------------------
+
+    #[pg_bench]
+    fn bench_sed_struct_large_k(b: &mut Bencher) {
+        b.iter_batched(
+            parse_pair,
+            |(t1, t2)| {
+                let (a, b) = (SEDStructIndex::from(t1), SEDStructIndex::from(t2));
+                black_box(bounded_sed_struct(&a, &b, K_LARGE))
+            },
+            BatchSize::SmallInput,
+        );
+    }
+
+    #[pg_bench]
+    fn bench_sed_struct_int_large_k(b: &mut Bencher) {
+        b.iter_batched(
+            parse_pair,
+            |(t1, t2)| {
+                let (i1, i2) = build_sed_struct_indices_int(&t1, &t2);
+                black_box(bounded_sed_struct_int(&i1, &i2, K_LARGE))
+            },
+            BatchSize::SmallInput,
+        );
+    }
 }
 
 /// This module is required by `cargo pgrx test` invocations.
