@@ -723,7 +723,7 @@ pub struct SEDIndexInt {
     pub tree_size: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TraversalCharacterInt {
     pub label: i32,
     pub sum: i32,
