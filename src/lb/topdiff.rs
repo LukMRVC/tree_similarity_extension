@@ -586,6 +586,97 @@ mod tests {
         assert_eq!(ted_pair("{a{b}{c}}", "{x{y}{z}}", 5), 3);
     }
 
+    /// Deterministic LCG for seeded random tree generation.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            // Numerical Recipes constants.
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn range(&mut self, n: usize) -> usize {
+            (self.next() >> 33) as usize % n
+        }
+    }
+
+    /// Build a random bracket-notation tree with up to `max_nodes` nodes from a
+    /// small label alphabet.
+    fn random_tree(rng: &mut Lcg, max_nodes: usize) -> String {
+        let labels = ["a", "b", "c", "d"];
+        let target = 1 + rng.range(max_nodes);
+        let mut remaining = target - 1; // nodes left to attach beyond the root
+        fn build(rng: &mut Lcg, labels: &[&str], remaining: &mut usize) -> String {
+            let mut s = String::from("{");
+            s.push_str(labels[rng.range(labels.len())]);
+            // Attach a random number of children while budget remains.
+            while *remaining > 0 {
+                // ~50% chance to add a child at each step (decaying with budget).
+                if rng.range(2) == 0 {
+                    break;
+                }
+                *remaining -= 1;
+                s.push_str(&build(rng, labels, remaining));
+            }
+            s.push('}');
+            s
+        }
+        build(rng, &labels, &mut remaining)
+    }
+
+    fn oracle(s1: &str, s2: &str, k: i32) -> i32 {
+        crate::cppffi::tree_topdiff_bounded(s1.to_string(), s2.to_string(), k) as i32
+    }
+
+    #[test]
+    fn differential_vs_cpp_oracle() {
+        // Deterministic hand-written pairs covering the key categories.
+        let mut pairs: Vec<(String, String)> = vec![
+            // Identical.
+            ("{a}".into(), "{a}".into()),
+            ("{a{b}{c}}".into(), "{a{b}{c}}".into()),
+            ("{a{b{d}}{c}}".into(), "{a{b{d}}{c}}".into()),
+            // One-edit (rename / insert / delete).
+            ("{a{b}{c}}".into(), "{a{b}{x}}".into()),
+            ("{a{b}}".into(), "{a}".into()),
+            ("{a}".into(), "{a{b}}".into()),
+            ("{a{b}{c}}".into(), "{a{b}{c}{d}}".into()),
+            // Size-mismatched.
+            ("{a}".into(), "{a{b}{c}{d}}".into()),
+            ("{a{b{c{d}}}}".into(), "{a}".into()),
+            // Structurally different.
+            ("{a{b}{c}}".into(), "{x{y}{z}}".into()),
+            ("{a{b{c}}}".into(), "{a{b}{c}}".into()),
+            ("{r{a}{b}{c}{d}}".into(), "{r{a{b{c{d}}}}}".into()),
+            ("{a{b{c}}{d{e}}}".into(), "{a{b{c}{d}}{e}}".into()),
+        ];
+
+        // Seeded random pairs for breadth.
+        let mut rng = Lcg(0x1234_5678_9abc_def0);
+        for _ in 0..60 {
+            let a = random_tree(&mut rng, 8);
+            let b = random_tree(&mut rng, 8);
+            pairs.push((a, b));
+        }
+
+        let ks = [1, 2, 3, 50];
+        let mut checked = 0usize;
+        for (s1, s2) in &pairs {
+            for &k in &ks {
+                let mut dict = LabelDict::default();
+                let t1 = TopDiffIndex::from_tree(&pt(s1), &mut dict);
+                let t2 = TopDiffIndex::from_tree(&pt(s2), &mut dict);
+                let got = ted_k(&t1, &t2, k);
+                let want = oracle(s1, s2, k);
+                assert_eq!(
+                    got, want,
+                    "mismatch for s1={s1} s2={s2} k={k}: rust={got} oracle={want}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 200, "expected a broad sweep, only checked {checked}");
+    }
+
     #[test]
     fn band_matrix_translate_and_fill() {
         let mut m = BandMatrix::new(5, 4, INF);
