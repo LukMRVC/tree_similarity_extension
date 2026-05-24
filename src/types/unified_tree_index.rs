@@ -92,6 +92,28 @@ impl UnifiedTreeIndex {
         assert_eq!(self.labels.len(), n);
         assert_eq!(self.sizes.len(), n);
 
+        // Empty tree: return empty forms rather than underflowing the topology
+        // reconstruction below (`n - 1`). The pipeline's size-diff gate lets an
+        // empty/empty pair reach here.
+        if n == 0 {
+            return (
+                SEDStructIndexInt {
+                    first_traversal: Vec::new(),
+                    second_traversal: Vec::new(),
+                    tree_size: 0,
+                },
+                TopDiffIndex {
+                    tree_size: 0,
+                    postl_to_label_id: Vec::new(),
+                    postl_to_size: Vec::new(),
+                    postl_to_depth: Vec::new(),
+                    postl_to_lch: Vec::new(),
+                    postl_to_kr_ancestor: Vec::new(),
+                    list_kr: Vec::new(),
+                },
+            );
+        }
+
         // ------------------------------------------------------------------
         // Step 1: Reconstruct tree topology from postorder {labels, sizes}.
         //

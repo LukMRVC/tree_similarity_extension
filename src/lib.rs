@@ -17,9 +17,12 @@ use crate::lb::{
         bounded_sed_struct_int, build_sed_indices_int, build_sed_struct_indices_int, sed,
     },
     structural_filter::ted as structural_lb,
+    topdiff::ted_k,
 };
 use types::{tree_structural, InvertedTree};
-use types::{SEDIndex, SEDStructIndex, StructuralFilter, StructuralSetConverter, TreeArena};
+use types::{
+    SEDIndex, SEDStructIndex, StructuralFilter, StructuralSetConverter, TreeArena, UnifiedTreeIndex,
+};
 
 #[cxx::bridge]
 mod cppffi {
@@ -218,10 +221,165 @@ fn tree_topdiff_bounded_ed(t1: TreeArena, t2: TreeArena, k: i32) -> i32 {
     tree_topdiff_bounded(t1.to_string(), t2.to_string(), k) as i32
 }
 
+/// Combined SED-Struct LB filter → TopDiff verification pipeline over a single
+/// pre-indexed `UnifiedTreeIndex` column. Each argument's CBOR is deserialized
+/// once; both trees are interned into one shared dictionary, expanded into the
+/// SED and TopDiff working forms, then run through Stage 1 (cheap SED-Struct
+/// lower bound) and — only on survivors — Stage 2 (exact bounded TopDiff).
+///
+/// Returns the TopDiff distance when the pair passes both stages (`<= k`),
+/// otherwise `k + 1` (over-bound), composable with `<= k` filters in SQL.
+/// Sound: SED-Struct is a true lower bound on TED, so `LB > k ⇒ TED > k`.
+#[pg_extern(immutable, parallel_safe, cost = 5000)]
+fn sed_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k: i32) -> i32 {
+    if k < 0 {
+        return k + 1;
+    }
+    let k_usize = k as usize;
+    // Stage 0 — size-diff gate (also covers empty/oversized-diff pairs).
+    if query.tree_size.abs_diff(cand.tree_size) > k_usize {
+        return k + 1;
+    }
+    // Empty-tree fast path: TED(∅, T) = |T| (all inserts/deletes). `expand` and
+    // `ted_k` are not defined for size-0 trees, so resolve here; the size-diff
+    // gate above already returned k+1 when |T| exceeds k.
+    if query.tree_size == 0 || cand.tree_size == 0 {
+        return query.tree_size.max(cand.tree_size) as i32;
+    }
+    // One shared label dictionary across both trees and both working forms, so
+    // Stage 1 and Stage 2 agree on which labels are equal.
+    let mut dict = rustc_hash::FxHashMap::default();
+    let (q_sed, q_td) = query.expand(&mut dict);
+    let (c_sed, c_td) = cand.expand(&mut dict);
+    // Stage 1 — SED-Struct lower bound (interned i32). Filtered out if LB > k.
+    if bounded_sed_struct_int(&q_sed, &c_sed, k_usize) > k_usize {
+        return k + 1;
+    }
+    // Stage 2 — exact bounded TopDiff; already returns k+1 on over-bound.
+    ted_k(&q_td, &c_td, k)
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
-    // TODO: Add postgres tests
+    use crate::parsing::parse_tree;
+    use crate::types::{TreeArena, UnifiedTreeIndex};
+    use pgrx::prelude::*;
+    use std::ffi::CString;
+
+    /// A spread of small trees covering varied shapes (chains, bushy, deep),
+    /// label overlap, and size differences.
+    const TREES: &[&str] = &[
+        "{a}",
+        "{a{b}}",
+        "{a{b}{c}}",
+        "{a{b}{c}{d}}",
+        "{a{b{e}}{c}}",
+        "{x{y}{z}}",
+        "{a{b}{x}}",
+        "{r{a{b}{c}}{d{e}}}",
+        "{r{a{b}{c}}{d{f}}}",
+        "{1{2}{3{4}}}",
+    ];
+
+    fn ta(s: &str) -> TreeArena {
+        parse_tree(CString::new(s).unwrap().as_c_str()).unwrap()
+    }
+    fn uti(s: &str) -> UnifiedTreeIndex {
+        UnifiedTreeIndex::from(ta(s))
+    }
+
+    /// Round-trip through the SQL boundary: bracket-notation input function +
+    /// CBOR arg serialization + the full pipeline.
+    #[pg_test]
+    fn sql_round_trip() {
+        let same = Spi::get_one::<i32>(
+            "SELECT sed_topdiff_within('{a{b}{c}}'::unifiedtreeindex, '{a{b}{c}}'::unifiedtreeindex, 5)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(same, 0);
+        let one = Spi::get_one::<i32>(
+            "SELECT sed_topdiff_within('{a{b}{c}}'::unifiedtreeindex, '{a{b}{x}}'::unifiedtreeindex, 5)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(one, 1);
+    }
+
+    /// Acceptance gate: the whole pipeline must equal exact APTED TED, capped at
+    /// k+1. This validates Stage-1 soundness (it never wrongly filters a within-k
+    /// pair) AND Stage-2 exactness together. `tree_ed` is the independent APTED
+    /// oracle.
+    #[pg_test]
+    fn within_matches_exact_ted() {
+        for &a in TREES {
+            for &b in TREES {
+                let exact = crate::tree_ed(ta(a), ta(b));
+                for &k in &[0i32, 1, 2, 3, 7, 50] {
+                    let expected = if exact <= k { exact } else { k + 1 };
+                    let got = crate::sed_topdiff_within(uti(a), uti(b), k);
+                    assert_eq!(
+                        got, expected,
+                        "sed_topdiff_within({a}, {b}, {k}) = {got}, expected {expected} (exact TED {exact})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The pipeline must agree end-to-end with the retained C++ TopDiff oracle
+    /// `tree_topdiff_bounded_ed` for every pair and k (both equal the capped TED).
+    #[pg_test]
+    fn pipeline_matches_cpp_oracle() {
+        for &a in TREES {
+            for &b in TREES {
+                for &k in &[0i32, 1, 2, 3, 7, 50] {
+                    let oracle = crate::tree_topdiff_bounded_ed(ta(a), ta(b), k);
+                    let got = crate::sed_topdiff_within(uti(a), uti(b), k);
+                    assert_eq!(
+                        got, oracle,
+                        "pipeline vs oracle mismatch for ({a}, {b}, k={k}): {got} != {oracle}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// SED-Struct is a sound lower bound: its bounded LB never exceeds the exact
+    /// TED. (If it did, Stage 1 could wrongly filter a true match.)
+    #[pg_test]
+    fn sed_struct_lb_is_sound() {
+        for &a in TREES {
+            for &b in TREES {
+                let exact = crate::tree_ed(ta(a), ta(b));
+                // Large bound so the LB is computed fully, not short-circuited.
+                let lb = crate::tree_lb_bounded_sed_struct(ta(a), ta(b), 1000);
+                assert!(
+                    lb <= exact,
+                    "SED-struct LB {lb} exceeds exact TED {exact} for ({a}, {b})"
+                );
+            }
+        }
+    }
+
+    /// Edge cases: empty trees and negative k.
+    #[pg_test]
+    fn edge_cases() {
+        let empty = || UnifiedTreeIndex {
+            labels: vec![],
+            sizes: vec![],
+            tree_size: 0,
+        };
+        // Two empty trees: TED 0.
+        assert_eq!(crate::sed_topdiff_within(empty(), empty(), 3), 0);
+        // Empty vs 3-node tree within budget: TED 3.
+        assert_eq!(crate::sed_topdiff_within(empty(), uti("{a{b}{c}}"), 5), 3);
+        // Empty vs 3-node tree, budget too small: k+1.
+        assert_eq!(crate::sed_topdiff_within(empty(), uti("{a{b}{c}}"), 1), 2);
+        // Negative k is always over-bound (returns k+1).
+        assert_eq!(crate::sed_topdiff_within(uti("{a}"), uti("{a}"), -1), 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +475,70 @@ mod benches {
             |(t1, t2)| {
                 let (i1, i2) = build_sed_struct_indices_int(&t1, &t2);
                 black_box(bounded_sed_struct_int(&i1, &i2, K_LARGE))
+            },
+            BatchSize::SmallInput,
+        );
+    }
+
+    // --- full pipeline: unified vs separate-calls vs C++ oracle -------------
+    //
+    // The core hypothesis: a single combined function over one UnifiedTreeIndex
+    // (one expand per argument) is faster than two separately-composed stages
+    // and competitive with the C++ end-to-end TopDiff. NOTE: these micro-benches
+    // exclude CBOR (de)serialization — the dominant SQL cost per CLAUDE.md. The
+    // Approach-B "do String labels dominate the payload?" gate is best measured
+    // on a loaded table via EXPLAIN ANALYZE, not in this harness.
+
+    use crate::lb::topdiff::{ted_k, TopDiffIndex};
+    use crate::types::UnifiedTreeIndex;
+
+    const K_PIPE: i32 = K_REALISTIC as i32;
+
+    /// Build a fresh `UnifiedTreeIndex` pair (untimed setup).
+    fn unified_pair() -> (UnifiedTreeIndex, UnifiedTreeIndex) {
+        let (t1, t2) = parse_pair();
+        (UnifiedTreeIndex::from(t1), UnifiedTreeIndex::from(t2))
+    }
+
+    #[pg_bench]
+    fn bench_unified_pipeline(b: &mut Bencher) {
+        b.iter_batched(
+            unified_pair,
+            |(q, c)| black_box(crate::sed_topdiff_within(q, c, K_PIPE)),
+            BatchSize::SmallInput,
+        );
+    }
+
+    /// Baseline: the two stages built and run separately (no shared substrate /
+    /// dict), mirroring two independently-composed `#[pg_extern]` calls.
+    #[pg_bench]
+    fn bench_separate_pipeline(b: &mut Bencher) {
+        b.iter_batched(
+            parse_pair,
+            |(t1, t2)| {
+                let (s1, s2) = build_sed_struct_indices_int(&t1, &t2);
+                let lb = bounded_sed_struct_int(&s1, &s2, K_REALISTIC);
+                let out = if lb > K_REALISTIC {
+                    K_PIPE + 1
+                } else {
+                    let mut d1 = rustc_hash::FxHashMap::default();
+                    let td1 = TopDiffIndex::from_tree(&t1, &mut d1);
+                    let mut d2 = rustc_hash::FxHashMap::default();
+                    let td2 = TopDiffIndex::from_tree(&t2, &mut d2);
+                    ted_k(&td1, &td2, K_PIPE)
+                };
+                black_box(out)
+            },
+            BatchSize::SmallInput,
+        );
+    }
+
+    #[pg_bench]
+    fn bench_cpp_topdiff_oracle(b: &mut Bencher) {
+        b.iter_batched(
+            parse_pair,
+            |(t1, t2)| {
+                black_box(crate::tree_topdiff_bounded_ed(t1, t2, K_PIPE))
             },
             BatchSize::SmallInput,
         );

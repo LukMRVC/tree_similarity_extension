@@ -67,7 +67,9 @@ impl BandMatrix {
         self.data[idx] = value;
     }
 
-    /// Mutable reference equivalent to C++ `at(row, col)`.
+    /// Mutable reference equivalent to C++ `at(row, col)`. Mirrors the C++ API
+    /// surface; the DP uses `set`/`read_at`, so this is exercised only by tests.
+    #[allow(dead_code)]
     #[inline]
     pub fn at(&mut self, row: usize, col: usize) -> &mut f64 {
         let idx = self.translate(row, col);
@@ -82,6 +84,9 @@ impl BandMatrix {
     }
 }
 
+// Reference builder used by tests and as the differential oracle for the
+// production `expand` in `unified_tree_index`; not reached by `ted_k` itself.
+#[allow(dead_code)]
 impl TopDiffIndex {
     /// Reference builder. Ports `node::index_tree` / `index_tree_recursion` for
     /// the `TreeIndexTouzetKRSet` subset of indices, plus `fill_kr_ancestors`.
