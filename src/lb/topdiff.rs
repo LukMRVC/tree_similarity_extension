@@ -396,10 +396,63 @@ impl TopDiffState {
 /// TED when it is `<= k`, otherwise `k + 1` (the over-bound convention, matching
 /// `bounded_sed_struct_int` and the C++ oracle `tree_topdiff_bounded`).
 ///
-/// STUB — implemented in Track A (plan task A5).
-#[allow(dead_code, unused_variables)]
+/// Port of `TouzetKRSetTreeIndex::ted_k` (`touzet_kr_set_tree_index_impl.cpp:32`).
 pub fn ted_k(t1: &TopDiffIndex, t2: &TopDiffIndex, k: i32) -> i32 {
-    todo!("Track A task A5: Touzet KR-set ted_k port")
+    use rustc_hash::FxHashMap;
+
+    let t1_size = t1.tree_size;
+    let t2_size = t2.tree_size;
+
+    let mut state = TopDiffState::new(t1_size, k);
+
+    // Root pair outside the k-strip (size difference too large) -> infinity.
+    if (t1_size - t2_size).abs() > k {
+        return k + 1;
+    }
+
+    // Map packed keyroot pair -> index into kr_vector.
+    let mut kr_pair_to_index: FxHashMap<u64, usize> = FxHashMap::default();
+    // Collected (top_x, top_y) pairs.
+    let mut kr_vector: Vec<(i32, i32)> = Vec::new();
+
+    // Nested loop over node pairs in the k-strip, in decreasing postorder.
+    for x in (0..t1_size).rev() {
+        let x_keyroot = t1.postl_to_kr_ancestor[x as usize];
+        let mut y = (x + k).min(t2_size - 1);
+        let y_low = (0).max(x - k);
+        while y >= y_low {
+            if k_relevant(t1, t2, x, y, k) {
+                let key = ((x_keyroot as u64) << 32) | (t2.postl_to_kr_ancestor[y as usize] as u64);
+                match kr_pair_to_index.get(&key) {
+                    None => {
+                        kr_pair_to_index.insert(key, kr_vector.len());
+                        kr_vector.push((x, y));
+                    }
+                    Some(&idx) => {
+                        // Update top_y to the max of current y and stored top_y.
+                        if y > kr_vector[idx].1 {
+                            kr_vector[idx].1 = y;
+                        }
+                    }
+                }
+            }
+            y -= 1;
+        }
+    }
+
+    // Iterate collected pairs backwards and run forest distance.
+    for &(x_l, y_l) in kr_vector.iter().rev() {
+        let e_max = e_budget(t1, t2, x_l, y_l, k);
+        let d = state.tree_dist(t1, t2, x_l, y_l, k, e_max);
+        state.td.set(x_l as usize, y_l as usize, d);
+    }
+
+    let result = state.td.read_at((t1_size - 1) as usize, (t2_size - 1) as usize);
+    // Over-bound convention: > k or infinite -> k+1.
+    if !result.is_finite() || result > k as f64 {
+        return k + 1;
+    }
+    result as i32
 }
 
 #[cfg(test)]
@@ -511,6 +564,26 @@ mod tests {
     fn tree_dist_one_delete() {
         // {a{b}} vs {a}: delete b -> distance 1.
         assert_eq!(tree_dist_roots("{a{b}}", "{a}", 4, 4), 1.0);
+    }
+
+    /// Parse both strings, build both indices against ONE shared dict, run ted_k.
+    fn ted_pair(s1: &str, s2: &str, k: i32) -> i32 {
+        let mut dict = LabelDict::default();
+        let t1 = TopDiffIndex::from_tree(&pt(s1), &mut dict);
+        let t2 = TopDiffIndex::from_tree(&pt(s2), &mut dict);
+        ted_k(&t1, &t2, k)
+    }
+
+    #[test]
+    fn ted_k_cases() {
+        assert_eq!(ted_pair("{a{b}{c}}", "{a{b}{c}}", 5), 0);
+        assert_eq!(ted_pair("{a{b}{c}}", "{a{b}{x}}", 5), 1);
+        // size diff (1 vs 4) > k=1 -> k+1 = 2
+        assert_eq!(ted_pair("{a}", "{a{b}{c}{d}}", 1), 2);
+        // true TED 3 (rename a,b,c) but k=2 caps at k+1 = 3
+        assert_eq!(ted_pair("{a{b}{c}}", "{x{y}{z}}", 2), 3);
+        // exact with k=5
+        assert_eq!(ted_pair("{a{b}{c}}", "{x{y}{z}}", 5), 3);
     }
 
     #[test]
