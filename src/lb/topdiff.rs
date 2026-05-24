@@ -243,6 +243,155 @@ pub fn k_relevant(t1: &TopDiffIndex, t2: &TopDiffIndex, x: i32, y: i32, k: i32) 
     lower_bound <= k
 }
 
+/// Unit cost model. `del == ins == 1.0`; `ren(a,b) == 0.0` iff label ids match.
+#[inline]
+fn cost_ren(a: i32, b: i32) -> f64 {
+    if a == b {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+const COST_DEL: f64 = 1.0;
+const COST_INS: f64 = 1.0;
+
+/// Holds the band matrices `td_` / `fd_` and a subproblem counter, mirroring the
+/// per-call state of `TEDAlgorithmTouzet`.
+pub struct TopDiffState {
+    /// Subtree distances, indexed by `(x, y)` postorder ids.
+    pub td: BandMatrix,
+    /// Subforest distances.
+    pub fd: BandMatrix,
+    /// Number of inner DP cells touched (diagnostic; mirrors C++ counter).
+    pub subproblem_counter: u64,
+}
+
+impl TopDiffState {
+    /// Equivalent of `init_matrices(t1_size, k)`.
+    pub fn new(t1_size: i32, k: i32) -> Self {
+        let inf = f64::INFINITY;
+        let td = BandMatrix::new(t1_size as usize, k as usize, inf);
+        let fd = BandMatrix::new((t1_size + 1) as usize, (k + 1) as usize, inf);
+        Self {
+            td,
+            fd,
+            subproblem_counter: 0,
+        }
+    }
+
+    /// Tree edit distance between subtrees rooted at postorder ids `x` (in `t1`)
+    /// and `y` (in `t2`), given remaining error budget `e` and original `k`.
+    /// Verbatim port of `TEDAlgorithmTouzet::tree_dist` (`ted_algorithm_touzet.h:163`).
+    #[allow(clippy::needless_range_loop)]
+    pub fn tree_dist(
+        &mut self,
+        t1: &TopDiffIndex,
+        t2: &TopDiffIndex,
+        x: i32,
+        y: i32,
+        k: i32,
+        e: i32,
+    ) -> f64 {
+        let inf = f64::INFINITY;
+        let x_size = t1.postl_to_size[x as usize];
+        let y_size = t2.postl_to_size[y as usize];
+
+        // Offsets to translate i and j to postorder ids.
+        let x_off = x - x_size;
+        let y_off = y - y_size;
+
+        // Helpers to access matrices with i32 indices (BandMatrix takes usize but
+        // its translation tolerates transient underflow via isize).
+        // For fd_ rows/cols and td_ ids, indices are always >= 0 where written.
+
+        // Initial cases.
+        self.fd.set(0, 0, 0.0); // (0,0) always within e-strip.
+        let mut j = 1;
+        while j <= y_size.min(e) {
+            let v = self.fd.read_at(0, (j - 1) as usize) + COST_INS;
+            self.fd.set(0, j as usize, v);
+            j += 1;
+        }
+        if e + 1 <= y_size {
+            self.fd.set(0, (e + 1) as usize, inf);
+        }
+
+        let mut i = 1;
+        while i <= x_size.min(e) {
+            let v = self.fd.read_at((i - 1) as usize, 0) + COST_DEL;
+            self.fd.set(i as usize, 0, v);
+            i += 1;
+        }
+        if e + 1 <= x_size {
+            self.fd.set((e + 1) as usize, 0, inf);
+        }
+
+        let mut candidate_result = inf;
+
+        // General cases.
+        for i in 1..=x_size {
+            if i - e - 1 >= 1 {
+                self.fd.set(i as usize, (i - e - 1) as usize, inf);
+            }
+            let i_forest = i - t1.postl_to_size[(i + x_off) as usize];
+            let mut j = (1).max(i - e);
+            while j <= (i + e).min(y_size) {
+                self.subproblem_counter += 1;
+
+                let j_forest = j - t2.postl_to_size[(j + y_off) as usize];
+
+                candidate_result = inf;
+                candidate_result = candidate_result
+                    .min(self.fd.read_at((i - 1) as usize, j as usize) + COST_DEL);
+                candidate_result = candidate_result
+                    .min(self.fd.read_at(i as usize, (j - 1) as usize) + COST_INS);
+
+                let mut fd_read = inf;
+                if i_forest != 0 || j_forest != 0 {
+                    let mut td_read = inf;
+                    if ((i + x_off) - (j + y_off)).abs() <= k {
+                        td_read = self.td.read_at((i + x_off) as usize, (j + y_off) as usize);
+                    }
+                    if (0).max(i_forest - e - 1) <= j_forest
+                        && j_forest <= (i_forest + e + 1).min(y_size)
+                    {
+                        fd_read = self.fd.read_at(i_forest as usize, j_forest as usize);
+                    }
+                    candidate_result = candidate_result.min(fd_read + td_read);
+                } else {
+                    // Pair of two subtrees.
+                    fd_read = self.fd.read_at((i - 1) as usize, (j - 1) as usize)
+                        + cost_ren(
+                            t1.postl_to_label_id[(i + x_off) as usize],
+                            t2.postl_to_label_id[(j + y_off) as usize],
+                        );
+                    candidate_result = candidate_result.min(fd_read);
+                    if candidate_result <= e as f64 && ((i + x_off) - (j + y_off)).abs() <= k {
+                        self.td
+                            .set((i + x_off) as usize, (j + y_off) as usize, candidate_result);
+                    }
+                }
+
+                if candidate_result > e as f64 {
+                    self.fd.set(i as usize, j as usize, inf);
+                } else {
+                    self.fd.set(i as usize, j as usize, candidate_result);
+                }
+                j += 1;
+            }
+            if i + e + 1 <= y_size {
+                self.fd.set(i as usize, (i + e + 1) as usize, inf);
+            }
+        }
+
+        if candidate_result > e as f64 {
+            return inf;
+        }
+        candidate_result
+    }
+}
+
 /// Bounded tree edit distance via the Touzet KR-set algorithm. Returns the exact
 /// TED when it is `<= k`, otherwise `k + 1` (the over-bound convention, matching
 /// `bounded_sed_struct_int` and the C++ oracle `tree_topdiff_bounded`).
@@ -334,6 +483,34 @@ mod tests {
         assert!(e_budget(&t1, &t2, 0, 3, 0) < 0);
         // k_relevant adds ||T1_x|-|T2_y|| = |1-4| = 3 -> lb = 4 > 0 -> false.
         assert!(!k_relevant(&t1, &t2, 0, 3, 0));
+    }
+
+    /// Run tree_dist on the root pair of two trees with a generous budget.
+    fn tree_dist_roots(s1: &str, s2: &str, k: i32, e: i32) -> f64 {
+        let mut d1 = LabelDict::default();
+        let t1 = TopDiffIndex::from_tree(&pt(s1), &mut d1);
+        let mut d2 = d1.clone();
+        let t2 = TopDiffIndex::from_tree(&pt(s2), &mut d2);
+        let mut state = TopDiffState::new(t1.tree_size, k);
+        let x = t1.tree_size - 1;
+        let y = t2.tree_size - 1;
+        state.tree_dist(&t1, &t2, x, y, k, e)
+    }
+
+    #[test]
+    fn tree_dist_identical_single_node() {
+        assert_eq!(tree_dist_roots("{a}", "{a}", 4, 4), 0.0);
+    }
+
+    #[test]
+    fn tree_dist_single_rename() {
+        assert_eq!(tree_dist_roots("{a}", "{b}", 4, 4), 1.0);
+    }
+
+    #[test]
+    fn tree_dist_one_delete() {
+        // {a{b}} vs {a}: delete b -> distance 1.
+        assert_eq!(tree_dist_roots("{a{b}}", "{a}", 4, 4), 1.0);
     }
 
     #[test]
