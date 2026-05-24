@@ -208,6 +208,41 @@ impl TopDiffIndex {
     }
 }
 
+/// Remaining error budget for the subtree pair `(x, y)`.
+/// Port of `TEDAlgorithmTouzet::e_budget` (`ted_algorithm_touzet.h:285`).
+///
+/// `e(x,y) = k - |(|T1|-(x+1)-depth(x)) - (|T2|-(y+1)-depth(y))|`
+///            `- |depth(x)-depth(y)| - |((x+1)-|T1_x|) - ((y+1)-|T2_y|)|`
+///
+/// May return a NEGATIVE value — callers must not clamp (matches the C++ note).
+pub fn e_budget(t1: &TopDiffIndex, t2: &TopDiffIndex, x: i32, y: i32, k: i32) -> i32 {
+    let x_size = t1.postl_to_size[x as usize];
+    let y_size = t2.postl_to_size[y as usize];
+    let dx = t1.postl_to_depth[x as usize];
+    let dy = t2.postl_to_depth[y as usize];
+    let lower_bound = ((t1.tree_size - (x + 1) - dx) - (t2.tree_size - (y + 1) - dy)).abs()
+        + (dx - dy).abs()
+        + (((x + 1) - x_size) - ((y + 1) - y_size)).abs();
+    k - lower_bound
+}
+
+/// Whether subtrees `T1_x` and `T2_y` are k-relevant.
+/// Port of `TEDAlgorithmTouzet::k_relevant` (`ted_algorithm_touzet.h:315`).
+///
+/// True iff `|(|T1|-(x+1)-depth(x)) - (|T2|-(y+1)-depth(y))| + |depth(x)-depth(y)|`
+///          `+ ||T1_x|-|T2_y|| + |((x+1)-|T1_x|) - ((y+1)-|T2_y|)| <= k`.
+pub fn k_relevant(t1: &TopDiffIndex, t2: &TopDiffIndex, x: i32, y: i32, k: i32) -> bool {
+    let x_size = t1.postl_to_size[x as usize];
+    let y_size = t2.postl_to_size[y as usize];
+    let dx = t1.postl_to_depth[x as usize];
+    let dy = t2.postl_to_depth[y as usize];
+    let lower_bound = ((t1.tree_size - (x + 1) - dx) - (t2.tree_size - (y + 1) - dy)).abs()
+        + (dx - dy).abs()
+        + (x_size - y_size).abs()
+        + (((x + 1) - x_size) - ((y + 1) - y_size)).abs();
+    lower_bound <= k
+}
+
 /// Bounded tree edit distance via the Touzet KR-set algorithm. Returns the exact
 /// TED when it is `<= k`, otherwise `k + 1` (the over-bound convention, matching
 /// `bounded_sed_struct_int` and the C++ oracle `tree_topdiff_bounded`).
@@ -278,6 +313,27 @@ mod tests {
         // keyroots: c=2 (non-first child of a), root a=3
         assert_eq!(sorted(&idx.list_kr), vec![2, 3]);
         assert_eq!(idx.postl_to_kr_ancestor, vec![3, 3, 2, 3]);
+    }
+
+    #[test]
+    fn e_budget_and_k_relevant() {
+        // t1 = {a{b}{c}}: size [1,1,3], depth [1,1,0]
+        let t1 = build("{a{b}{c}}");
+        // Root vs root, identical tree, k=5: lower bound 0, full budget.
+        assert_eq!(e_budget(&t1, &t1, 2, 2, 5), 5);
+        assert!(k_relevant(&t1, &t1, 2, 2, 5));
+
+        // t2 = {a{b{d}}{c}}: size [1,2,1,4], depth [2,1,1,0]
+        let t2 = build("{a{b{d}}{c}}");
+        // x=0 (leaf b in t1: size 1, depth 1), y=3 (root in t2: size 4, depth 0), k=0.
+        // term1 = |(3-1-1)-(4-4-0)| = |1-0| = 1
+        // term2 = |1-0| = 1
+        // term3 = |((1)-1)-((4)-4)| = 0
+        // e_budget lower bound = 2 -> e_budget = 0 - 2 = -2 (stays negative).
+        assert_eq!(e_budget(&t1, &t2, 0, 3, 0), -2);
+        assert!(e_budget(&t1, &t2, 0, 3, 0) < 0);
+        // k_relevant adds ||T1_x|-|T2_y|| = |1-4| = 3 -> lb = 4 > 0 -> false.
+        assert!(!k_relevant(&t1, &t2, 0, 3, 0));
     }
 
     #[test]
