@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use pgrx::prelude::*;
 use pgrx::{InOutFuncs, PostgresType};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use super::{tree_internals::id::NodeId, TreeArena};
 use crate::parsing::{parse_tree, LabelId, ParsedTree};

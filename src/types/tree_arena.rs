@@ -64,7 +64,7 @@ impl TreeArena {
         if self.nodes.is_empty() {
             None
         } else {
-            self.nodes.get(0)
+            self.nodes.first()
         }
     }
 
@@ -134,12 +134,12 @@ impl TreeArena {
     }
 
     /// Returns an iterator of all nodes in the arena in storage-order.
-    pub fn iter(&self) -> slice::Iter<Node> {
+    pub fn iter(&self) -> slice::Iter<'_, Node> {
         self.nodes.iter()
     }
 
     /// Returns a mutable iterator of all nodes in the arena in storage-order.
-    pub fn iter_mut(&mut self) -> slice::IterMut<Node> {
+    pub fn iter_mut(&mut self) -> slice::IterMut<'_, Node> {
         self.nodes.iter_mut()
     }
 

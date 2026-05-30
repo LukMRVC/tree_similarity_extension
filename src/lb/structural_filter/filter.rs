@@ -20,7 +20,7 @@ fn split_svec_l1(n1: &SplitStructuralVec, n2: &SplitStructuralVec) -> i32 {
                     .map(|(s1, s2)| min(s1, s2))
                     .sum::<RegionNumType>())
         });
-    sum as i32
+    sum
 }
 
 #[inline(always)]

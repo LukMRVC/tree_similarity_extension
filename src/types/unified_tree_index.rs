@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::parsing::parse_tree;
 use crate::lb::sed::{LabelDict, SEDStructIndexInt, TraversalCharacterInt};
-use crate::lb::topdiff::TopDiffIndex;
+use crate::lb::ted::topdiff::TopDiffIndex;
 use crate::types::tree_internals::id::NodeId;
 use crate::TreeArena;
 
@@ -127,7 +127,7 @@ impl UnifiedTreeIndex {
 
         let mut stack: Vec<usize> = Vec::with_capacity(n);
 
-        for i in 0..n {
+        for (i, child_slot) in children.iter_mut().enumerate() {
             let sz = self.sizes[i] as usize;
             let mut remaining = sz - 1;
             let mut child_ids: Vec<usize> = Vec::new();
@@ -144,7 +144,7 @@ impl UnifiedTreeIndex {
             for &c in &child_ids {
                 parent[c] = i as i32;
             }
-            children[i] = child_ids;
+            *child_slot = child_ids;
             stack.push(i);
         }
 
@@ -247,16 +247,16 @@ impl UnifiedTreeIndex {
         // is_keyroot: root + non-first children.
         let mut is_keyroot: Vec<bool> = vec![false; n];
         is_keyroot[n - 1] = true;
-        for i in 0..n {
-            for &c in children[i].iter().skip(1) {
+        for kids in &children {
+            for &c in kids.iter().skip(1) {
                 is_keyroot[c] = true;
             }
         }
 
         // list_kr: non-first children + root.
         let mut list_kr: Vec<i32> = vec![(n - 1) as i32]; // root
-        for i in 0..n {
-            for &c in children[i].iter().skip(1) {
+        for kids in &children {
+            for &c in kids.iter().skip(1) {
                 list_kr.push(c as i32);
             }
         }
@@ -308,7 +308,7 @@ fn intern_local(dict: &mut LabelDict, label: &str) -> i32 {
 mod tests {
     use super::*;
     use crate::lb::sed::bounded_sed_struct_int;
-    use crate::lb::topdiff::TopDiffIndex;
+    use crate::lb::ted::topdiff::TopDiffIndex;
     use rustc_hash::FxHashMap;
 
     fn pt(s: &str) -> TreeArena {

@@ -17,9 +17,9 @@ use crate::lb::{
         bounded_sed_struct_int, build_sed_indices_int, build_sed_struct_indices_int, sed,
     },
     structural_filter::ted as structural_lb,
-    topdiff::ted_k,
+    ted::topdiff::ted_k,
 };
-use types::{tree_structural, InvertedTree};
+use types::InvertedTree;
 use types::{
     SEDIndex, SEDStructIndex, StructuralFilter, StructuralSetConverter, TreeArena, UnifiedTreeIndex,
 };
@@ -177,7 +177,7 @@ fn tree_lb_structural_filter(t1: TreeArena, t2: TreeArena, lb: i32) -> i32 {
         return lb + 1;
     }
     let mut lsc = StructuralSetConverter::default();
-    let tree_tuples = lsc.create(&vec![t1, t2]);
+    let tree_tuples = lsc.create(&[t1, t2]);
     match &tree_tuples[..2] {
         [s1, s2] => structural_lb(s1, s2, lb),
         _ => panic!("Trees failed to convert!"),
@@ -192,7 +192,7 @@ fn lb_structural_filter(t1: StructuralFilter, t2: StructuralFilter, lb: i32) -> 
 #[pg_extern(immutable, parallel_safe, cost = 500)]
 fn treearena_to_structural_filter_tuple(t1: TreeArena) -> StructuralFilter {
     let mut lsc = StructuralSetConverter::default();
-    let mut tree_tuples = lsc.create(&vec![t1]);
+    let mut tree_tuples = lsc.create(&[t1]);
     let Some(t) = tree_tuples.pop() else {
         panic!("Tree failed to convert")
     };
@@ -489,7 +489,7 @@ mod benches {
     // Approach-B "do String labels dominate the payload?" gate is best measured
     // on a loaded table via EXPLAIN ANALYZE, not in this harness.
 
-    use crate::lb::topdiff::{ted_k, TopDiffIndex};
+    use crate::lb::ted::topdiff::{ted_k, TopDiffIndex};
     use crate::types::UnifiedTreeIndex;
 
     const K_PIPE: i32 = K_REALISTIC as i32;

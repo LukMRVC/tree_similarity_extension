@@ -76,7 +76,7 @@ impl InOutFuncs for StructuralFilter {
 impl From<TreeArena> for StructuralFilter {
     fn from(value: TreeArena) -> Self {
         let mut lsc = LabelSetConverter::default();
-        let mut tmp = lsc.create(&vec![value]);
+        let mut tmp = lsc.create(&[value]);
         let Some(sft) = tmp.pop() else {
             panic!("Unable to convert tree into structural tuple")
         };

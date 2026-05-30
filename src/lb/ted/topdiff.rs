@@ -318,7 +318,7 @@ impl TopDiffState {
             self.fd.set(0, j as usize, v);
             j += 1;
         }
-        if e + 1 <= y_size {
+        if e < y_size {
             self.fd.set(0, (e + 1) as usize, inf);
         }
 
@@ -328,7 +328,7 @@ impl TopDiffState {
             self.fd.set(i as usize, 0, v);
             i += 1;
         }
-        if e + 1 <= x_size {
+        if e < x_size {
             self.fd.set((e + 1) as usize, 0, inf);
         }
 
@@ -336,7 +336,7 @@ impl TopDiffState {
 
         // General cases.
         for i in 1..=x_size {
-            if i - e - 1 >= 1 {
+            if i - e > 1 {
                 self.fd.set(i as usize, (i - e - 1) as usize, inf);
             }
             let i_forest = i - t1.postl_to_size[(i + x_off) as usize];
@@ -385,7 +385,7 @@ impl TopDiffState {
                 }
                 j += 1;
             }
-            if i + e + 1 <= y_size {
+            if i + e < y_size {
                 self.fd.set(i as usize, (i + e + 1) as usize, inf);
             }
         }
