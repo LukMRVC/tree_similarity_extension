@@ -5,6 +5,7 @@ pgrx::pg_module_magic!();
 
 mod lb;
 mod parsing;
+mod pipelines;
 mod types;
 
 use crate::lb::{
@@ -252,7 +253,7 @@ fn sed_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k: i32) -
     let (q_sed, q_td) = query.expand(&mut dict);
     let (c_sed, c_td) = cand.expand(&mut dict);
     // Stage 1 — SED-Struct lower bound (interned i32). Filtered out if LB > k.
-    if bounded_sed_struct_int(&q_sed, &c_sed, k_usize) > k_usize {
+    if bounded_sed_struct_int(&q_sed, &c_sed, k_usize + 1) > k_usize {
         return k + 1;
     }
     // Stage 2 — exact bounded TopDiff; already returns k+1 on over-bound.
@@ -402,7 +403,9 @@ mod benches {
     use pgrx::prelude::*;
     use pgrx_bench::{black_box, BatchSize, Bencher};
 
-    use crate::lb::sed::{bounded_sed_struct, bounded_sed_struct_int, build_sed_struct_indices_int};
+    use crate::lb::sed::{
+        bounded_sed_struct, bounded_sed_struct_int, build_sed_struct_indices_int,
+    };
     use crate::parsing::parse_tree;
     use crate::types::{SEDStructIndex, TreeArena};
     use std::ffi::CString;
@@ -537,9 +540,7 @@ mod benches {
     fn bench_cpp_topdiff_oracle(b: &mut Bencher) {
         b.iter_batched(
             parse_pair,
-            |(t1, t2)| {
-                black_box(crate::tree_topdiff_bounded_ed(t1, t2, K_PIPE))
-            },
+            |(t1, t2)| black_box(crate::tree_topdiff_bounded_ed(t1, t2, K_PIPE)),
             BatchSize::SmallInput,
         );
     }
