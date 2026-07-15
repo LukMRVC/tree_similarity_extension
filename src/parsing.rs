@@ -23,11 +23,14 @@ const TOKEN_OPEN_NODE: u8 = b'{';
 const TOKEN_CLOSE_NODE: u8 = b'}';
 const TOKEN_ESCAPE: u8 = b'\\';
 
+// A brace is escaped iff the byte before it is `\`. Kept byte-for-byte
+// equivalent to `is_escaped` in ted-search's `lib/tree-parsing`, which is what
+// produced the dataset bracket files: an extra `byte_string[offset - 2]`
+// lookback here used to disagree with it on odd backslash runs of three or more
+// (`\\\}`), so lines that library accepts failed to parse.
 #[inline(always)]
 fn is_escaped(byte_string: &[u8], offset: usize) -> bool {
-    offset > 0
-        && byte_string[offset - 1] == TOKEN_ESCAPE
-        && !(offset > 1 && byte_string[offset - 2] == TOKEN_ESCAPE)
+    offset > 0 && byte_string[offset - 1] == TOKEN_ESCAPE
 }
 
 pub fn parse_tree(tree_bracket_str: &CStr) -> Result<TreeArena, TreeParseError> {
