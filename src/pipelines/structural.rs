@@ -2,19 +2,20 @@
 //!
 //! Sibling of `crate::sed_topdiff_within`: same two-stage contract, but Stage 1
 //! is the STRUCTURAL FILTER lower bound (`crate::lb::structural_filter::ted`)
-//! instead of the SED-Struct one. Stage 1 is computed straight from the
-//! `UnifiedTreeIndex` postorder substrate by reconstructing a `TreeArena` for
-//! each input (topology recovered from the {postorder id, subtree size} pair via
-//! the sizes-stack trick) and feeding both through ONE `StructuralSetConverter`
-//! (shared label universe), exactly as `crate::tree_lb_structural_filter` does.
-//! Only survivors pay for `expand()` + exact bounded TopDiff `ted_k`.
+//! instead of the SED-Struct one. Stage 1 builds each input's `StructuralFilter`
+//! straight from the `UnifiedTreeIndex` postorder substrate (label hashes +
+//! subtree sizes), producing exactly what `LabelSetConverter::create` builds
+//! from the parsed tree. Only survivors pay for `expand()` + exact bounded
+//! TopDiff `ted_k`.
 
 use pgrx::prelude::*;
 
 use crate::lb::structural_filter::ted as structural_lb;
 use crate::lb::ted::topdiff::ted_k;
-use crate::types::tree_internals::id::NodeId;
-use crate::types::{StructuralSetConverter, TreeArena, UnifiedTreeIndex};
+use crate::types::tree_structural::{
+    LabelSetElement, LabelSetElementBase, RegionNumType, StructHashMap, StructuralVec,
+};
+use crate::types::{StructuralFilter, UnifiedTreeIndex};
 
 // ---------------------------------------------------------------------------
 // Substrate helpers (inherent methods on UnifiedTreeIndex, `structural_`-prefixed
@@ -22,92 +23,81 @@ use crate::types::{StructuralSetConverter, TreeArena, UnifiedTreeIndex};
 // ---------------------------------------------------------------------------
 
 impl UnifiedTreeIndex {
-    /// Reconstruct a `TreeArena` from the postorder `{labels, sizes}` substrate.
+    /// Build the tree's `StructuralFilter` directly from the postorder
+    /// substrate, equal to `StructuralFilter::from(tree)` on the parsed tree.
     ///
-    /// Postorder ids together with subtree sizes uniquely determine the topology:
-    /// scanning postorder with a stack, node `i`'s direct children are the stack
-    /// entries whose sizes sum to `sizes[i] - 1` (popped right→left, so reversed
-    /// to left→right). The root (postorder `n-1`) is created FIRST so it lands at
-    /// arena index 0 — `StructuralSetConverter` takes `tree.iter().next()` as the
-    /// root — and children are appended left→right so postorder numbering matches
-    /// the originally parsed tree. Empty substrate yields an empty arena.
-    fn structural_rebuild_arena(&self) -> TreeArena {
+    /// For node `i` (postorder id `p = i + 1`, subtree size `s`, depth `d`) the
+    /// regions are `[left, ancestors, right, descendants] =
+    /// [p - s, d, n - (p + d), s - 1]`, the values `LabelSetConverter::
+    /// create_record` computes during its traversal. Nodes are added to their
+    /// label's set in postorder, as `create_record` does.
+    fn structural_filter_from_substrate(&self) -> StructuralFilter {
         let n = self.tree_size;
-        let mut arena = TreeArena::with_capacity(n);
-        if n == 0 {
-            return arena;
+
+        // Depth of every node. Node j's subtree spans postorder ids
+        // [j + 1 - sizes[j], j], so scanning from the root (n - 1) downwards
+        // with a stack of subtree start ids, the entries left after popping
+        // those that do not contain i are exactly i's ancestors.
+        let mut depth: Vec<RegionNumType> = vec![0; n];
+        let mut ancestor_starts: Vec<usize> = Vec::new();
+        for i in (0..n).rev() {
+            while ancestor_starts.last().is_some_and(|&start| start > i) {
+                ancestor_starts.pop();
+            }
+            depth[i] = ancestor_starts.len() as RegionNumType;
+            ancestor_starts.push(i + 1 - self.sizes[i] as usize);
         }
 
-        // children[i] = left→right postorder ids of node i's direct children.
-        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
-        let mut stack: Vec<usize> = Vec::with_capacity(n);
+        let tree_size = n as RegionNumType;
+        let mut record_labels = StructHashMap::default();
         for i in 0..n {
-            let sz = self.sizes[i] as usize;
-            let mut remaining = sz - 1;
-            let mut child_ids: Vec<usize> = Vec::new();
-            while remaining > 0 {
-                let c = *stack
-                    .last()
-                    .expect("stack underflow during topology reconstruction");
-                let c_sz = self.sizes[c] as usize;
-                stack.pop();
-                child_ids.push(c);
-                remaining -= c_sz;
-            }
-            child_ids.reverse(); // right→left pop order → left→right children
-            children[i] = child_ids;
-            stack.push(i);
+            let label = self.labels[i];
+            let postorder_id = i as RegionNumType + 1;
+            let size = self.sizes[i];
+            let d = depth[i];
+            let node_struct_vec = StructuralVec {
+                label_id: label,
+                postorder_id,
+                mapping_regions: [
+                    postorder_id - size,
+                    d,
+                    tree_size - (postorder_id + d),
+                    size - 1,
+                ],
+            };
+            let se = record_labels.entry(label).or_insert_with(|| LabelSetElement {
+                base: LabelSetElementBase {
+                    id: label,
+                    weight: 0,
+                    ..LabelSetElementBase::default()
+                },
+                ..LabelSetElement::default()
+            });
+            se.base.weight += 1;
+            se.struct_vec.push(node_struct_vec);
         }
 
-        // Preorder build so every parent exists (and the root is created first,
-        // landing at index 0) before its children are attached.
-        let root_post = n - 1;
-        let mut post_to_nid: Vec<Option<NodeId>> = vec![None; n];
-        let root_nid = arena.new_node(self.labels[root_post].clone());
-        post_to_nid[root_post] = Some(root_nid);
-
-        let mut dfs: Vec<usize> = vec![root_post];
-        while let Some(p) = dfs.pop() {
-            let p_nid = post_to_nid[p].expect("parent created before its children");
-            for &c in &children[p] {
-                let c_nid = arena.new_node(self.labels[c].clone());
-                post_to_nid[c] = Some(c_nid);
-                p_nid.append(c_nid, &mut arena);
-            }
-            for &c in children[p].iter().rev() {
-                dfs.push(c);
-            }
-        }
-
-        arena
+        StructuralFilter(n, record_labels)
     }
 
     /// Stage-1 structural-filter lower bound on TED, computed purely from the
     /// substrate. Mirrors `crate::tree_lb_structural_filter(t1, t2, k)` exactly:
-    /// the same size-diff gate, ONE shared `StructuralSetConverter` for both
-    /// trees, and `structural_lb(s1, s2, k)`. Sound: `structural_lb` is a true
-    /// lower bound used at threshold `k`, so `LB > k ⇒ TED > k`.
-    ///
-    /// Both trees MUST be non-empty — `StructuralSetConverter::create` panics on
-    /// an empty tree; the pipeline's stage-0 gates guarantee this before the call.
+    /// the same size-diff gate, then `structural_lb(s1, s2, k)`. Sound:
+    /// `structural_lb` is a true lower bound used at threshold `k`, so
+    /// `LB > k ⇒ TED > k`.
     fn structural_stage1_lb(&self, cand: &UnifiedTreeIndex, k: i32) -> i32 {
         if self.tree_size.abs_diff(cand.tree_size) as i32 > k {
             return k + 1;
         }
-        let t1 = self.structural_rebuild_arena();
-        let t2 = cand.structural_rebuild_arena();
-        let mut lsc = StructuralSetConverter::default();
-        let tuples = lsc.create(&[t1, t2]);
-        match &tuples[..2] {
-            [s1, s2] => structural_lb(s1, s2, k),
-            _ => panic!("Trees failed to convert!"),
-        }
+        let s1 = self.structural_filter_from_substrate();
+        let s2 = cand.structural_filter_from_substrate();
+        structural_lb(&s1, &s2, k)
     }
 }
 
 /// Combined Structural-filter LB → TopDiff verification pipeline over a single
-/// pre-indexed `UnifiedTreeIndex` column. Stage 1 reconstructs a `TreeArena` for
-/// each argument from its postorder substrate and runs the cheap structural
+/// pre-indexed `UnifiedTreeIndex` column. Stage 1 builds each argument's
+/// structural filter from its postorder substrate and runs the cheap structural
 /// lower bound; only survivors are `expand`ed into the TopDiff working form and
 /// verified with exact bounded TopDiff.
 ///
@@ -125,9 +115,9 @@ fn structural_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k:
     if query.tree_size.abs_diff(cand.tree_size) > k_usize {
         return k + 1;
     }
-    // Empty-tree fast path: TED(∅, T) = |T| (all inserts/deletes). The structural
-    // converter and `ted_k` are not defined for size-0 trees, so resolve here;
-    // the size-diff gate above already returned k+1 when |T| exceeds k.
+    // Empty-tree fast path: TED(∅, T) = |T| (all inserts/deletes). `expand` and
+    // `ted_k` are not defined for size-0 trees, so resolve here; the size-diff
+    // gate above already returned k+1 when |T| exceeds k.
     if query.tree_size == 0 || cand.tree_size == 0 {
         return query.tree_size.max(cand.tree_size) as i32;
     }
@@ -137,12 +127,10 @@ fn structural_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k:
     if query.structural_stage1_lb(&cand, k) > k {
         return k + 1;
     }
-    // Stage 2 — survivors only: one shared label dictionary across both trees so
-    // label ids agree, then exact bounded TopDiff (already returns k+1 on
+    // Stage 2 — survivors only: exact bounded TopDiff (already returns k+1 on
     // over-bound). The SED halves of `expand` are discarded.
-    let mut dict = rustc_hash::FxHashMap::default();
-    let (_q_sed, q_td) = query.expand(&mut dict);
-    let (_c_sed, c_td) = cand.expand(&mut dict);
+    let (_q_sed, q_td) = query.expand();
+    let (_c_sed, c_td) = cand.expand();
     ted_k(&q_td, &c_td, k)
 }
 
@@ -153,7 +141,7 @@ fn structural_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k:
 #[cfg(test)]
 mod structural_unit_tests {
     use crate::parsing::parse_tree;
-    use crate::types::{TreeArena, UnifiedTreeIndex};
+    use crate::types::{StructuralFilter, TreeArena, UnifiedTreeIndex};
     use std::ffi::CString;
 
     /// Same corpus as the lib.rs acceptance tests: varied shapes (chains, bushy,
@@ -178,18 +166,21 @@ mod structural_unit_tests {
         UnifiedTreeIndex::from(ta(s))
     }
 
-    /// Reconstruction differential: rebuilding a `TreeArena` from the substrate
-    /// and re-deriving a `UnifiedTreeIndex` from it reproduces the exact same
-    /// {labels, sizes, tree_size}. Proves the topology recovery is faithful.
+    /// Construction differential: the filter built from the substrate must equal
+    /// the one `LabelSetConverter` builds from the parsed tree — same label sets,
+    /// weights, postorder ids and region vectors, in the same order.
     #[test]
-    fn reconstruction_roundtrip() {
-        for &s in TREES {
-            let u = uti(s);
-            let rebuilt = u.structural_rebuild_arena();
-            let u2 = UnifiedTreeIndex::from(rebuilt);
-            assert_eq!(u.labels, u2.labels, "labels mismatch for {s}");
-            assert_eq!(u.sizes, u2.sizes, "sizes mismatch for {s}");
-            assert_eq!(u.tree_size, u2.tree_size, "tree_size mismatch for {s}");
+    fn substrate_filter_matches_label_set_converter() {
+        let repeated_labels = [
+            "{a{b}{a{b}{c}{a}}{b}}",
+            "{a{c}{b{a{a}{b}{c}}}}",
+            "{a{a{a{a}}}}",
+            "{a{a}{a}{a{a}{a}}}",
+        ];
+        for &s in TREES.iter().chain(repeated_labels.iter()) {
+            let mine = uti(s).structural_filter_from_substrate();
+            let reference = StructuralFilter::from(ta(s));
+            assert_eq!(mine, reference, "structural filter mismatch for {s}");
         }
     }
 

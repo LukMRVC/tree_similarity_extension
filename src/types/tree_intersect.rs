@@ -5,8 +5,8 @@ use pgrx::{InOutFuncs, PostgresType};
 use serde::{Deserialize, Serialize};
 
 use super::{tree_internals::id::NodeId, TreeArena};
-use crate::parsing::{parse_tree, LabelId, ParsedTree};
-type InvListLblPost = HashMap<LabelId, i32>;
+use crate::parsing::{parse_tree, ParsedTree};
+type InvListLblPost = HashMap<String, i32>;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, PostgresType)]
 #[inoutfuncs]

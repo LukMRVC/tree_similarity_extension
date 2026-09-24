@@ -8,17 +8,17 @@
 
 use pgrx::prelude::*;
 
-use crate::lb::sed::{bounded_sed, SEDIndex};
+use crate::lb::sed::{bounded_sed_int, SEDIndexInt};
 use crate::lb::ted::topdiff::ted_k;
 use crate::types::UnifiedTreeIndex;
 
 // ============================================================================
-// Substrate → plain SEDIndex (String-labelled) construction
+// Substrate → plain SEDIndexInt (hashed-label) construction
 // ============================================================================
 
 impl UnifiedTreeIndex {
-    /// Build the plain, label-only `SEDIndex` (preorder + postorder label
-    /// sequences) directly from the postorder substrate — no interning/dict.
+    /// Build the plain, label-only `SEDIndexInt` (preorder + postorder label
+    /// hash sequences) directly from the postorder substrate.
     ///
     /// The postorder sequence is `labels` verbatim (the substrate stores nodes
     /// in postorder). The preorder sequence is recovered by reconstructing the
@@ -27,10 +27,10 @@ impl UnifiedTreeIndex {
     ///
     /// The empty tree yields empty sequences; callers guard the empty case
     /// before Stage 1, so this is only defensive.
-    fn sed_plain_build_sed_index(&self) -> SEDIndex {
+    fn sed_plain_build_sed_index(&self) -> SEDIndexInt {
         let n = self.tree_size;
         if n == 0 {
-            return SEDIndex {
+            return SEDIndexInt {
                 preorder: Vec::new(),
                 postorder: Vec::new(),
                 tree_size: 0,
@@ -63,19 +63,19 @@ impl UnifiedTreeIndex {
 
         // Preorder DFS from the root (postorder id n-1): emit node, then children
         // left→right (push reversed so leftmost is popped first).
-        let mut preorder: Vec<String> = Vec::with_capacity(n);
+        let mut preorder = Vec::with_capacity(n);
         let mut dfs_stack: Vec<usize> = vec![n - 1];
         while let Some(node) = dfs_stack.pop() {
-            preorder.push(self.labels[node].clone());
+            preorder.push(self.labels[node]);
             for &c in children[node].iter().rev() {
                 dfs_stack.push(c);
             }
         }
 
         // Postorder is the substrate label order as-is.
-        let postorder: Vec<String> = self.labels.clone();
+        let postorder = self.labels.clone();
 
-        SEDIndex {
+        SEDIndexInt {
             preorder,
             postorder,
             tree_size: n,
@@ -90,8 +90,8 @@ impl UnifiedTreeIndex {
 /// Two-stage tree-similarity pipeline over a single pre-indexed
 /// `UnifiedTreeIndex` column, using a **plain** SED lower bound as the Stage-1
 /// filter. Each argument's CBOR is deserialized once; Stage 1 builds the plain
-/// label-only SED traversal indices directly from the substrate and runs the
-/// bounded string edit distance. Only survivors reach Stage 2, which expands the
+/// label-only SED traversal indices (label hashes) directly from the substrate
+/// and runs the bounded string edit distance. Only survivors reach Stage 2, which expands the
 /// substrate into the TopDiff working form and runs exact bounded TopDiff.
 ///
 /// Returns the TopDiff distance when the pair passes both stages (`<= k`),
@@ -108,30 +108,29 @@ fn sed_plain_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k: 
     if query.tree_size.abs_diff(cand.tree_size) > k_usize {
         return k + 1;
     }
-    // Empty-tree fast path: TED(∅, T) = |T| (all inserts/deletes). `bounded_sed`,
+    // Empty-tree fast path: TED(∅, T) = |T| (all inserts/deletes). `bounded_sed_int`,
     // `expand` and `ted_k` are not defined for size-0 trees, so resolve here; the
     // size-diff gate above already returned k+1 when |T| exceeds k.
     if query.tree_size == 0 || cand.tree_size == 0 {
         return query.tree_size.max(cand.tree_size) as i32;
     }
     // Stage 1 — PLAIN bounded SED lower bound over label-only traversal
-    // sequences, built directly from the substrate (no expand, no dict).
+    // sequences, built directly from the substrate (no expand).
     //
-    // Bound mapping: `bounded_sed(t1, t2, b)` returns the exact SED `d` when
+    // Bound mapping: `bounded_sed_int(t1, t2, b)` returns the exact SED `d` when
     // `d <= b`, and a value `>= b + 1` (over-bound) when `d > b`. With budget
-    // `b = k` the test `bounded_sed(..) > k` fires exactly when `d > k`, and
+    // `b = k` the test `bounded_sed_int(..) > k` fires exactly when `d > k`, and
     // never when `d <= k` (which returns exactly `d <= k`). Since `d <= TED`,
     // firing proves `TED > k`, so filtering out is sound.
     let q_idx = query.sed_plain_build_sed_index();
     let c_idx = cand.sed_plain_build_sed_index();
-    if bounded_sed(&q_idx, &c_idx, k_usize) > k_usize {
+    if bounded_sed_int(&q_idx, &c_idx, k_usize) > k_usize {
         return k + 1;
     }
-    // Stage 2 — fresh shared label dictionary, expand into the TopDiff working
-    // form (discard the SED-Struct halves), exact bounded TopDiff.
-    let mut dict = rustc_hash::FxHashMap::default();
-    let (_q_sed, q_td) = query.expand(&mut dict);
-    let (_c_sed, c_td) = cand.expand(&mut dict);
+    // Stage 2 — expand into the TopDiff working form (discard the SED-Struct
+    // halves), exact bounded TopDiff.
+    let (_q_sed, q_td) = query.expand();
+    let (_c_sed, c_td) = cand.expand();
     ted_k(&q_td, &c_td, k)
 }
 
@@ -143,7 +142,7 @@ fn sed_plain_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k: 
 mod sed_plain_unit_tests {
     use super::*;
     use crate::lb::sed::{bounded_sed, SEDIndex};
-    use crate::parsing::parse_tree;
+    use crate::parsing::{label_hash, parse_tree, LabelHash};
     use crate::types::{TreeArena, UnifiedTreeIndex};
     use std::ffi::CString;
 
@@ -176,9 +175,13 @@ mod sed_plain_unit_tests {
         }
     }
 
-    /// Differential: the plain `SEDIndex` built from the substrate must produce
-    /// the same traversal sequences AND the same `bounded_sed` results as the
-    /// reference `SEDIndex::index_tree` over a parsed `TreeArena`.
+    fn hashes(labels: &[String]) -> Vec<LabelHash> {
+        labels.iter().map(|l| label_hash(l.as_bytes())).collect()
+    }
+
+    /// Differential: the hashed `SEDIndexInt` built from the substrate must
+    /// produce the hashes of the reference `SEDIndex::index_tree` sequences AND
+    /// the same bounded SED results as the String-labelled `bounded_sed`.
     #[test]
     fn substrate_sed_index_matches_reference() {
         for &a in TREES {
@@ -189,12 +192,12 @@ mod sed_plain_unit_tests {
                 let ref_c = SEDIndex::index_tree(&ta(b));
 
                 // Sequences identical (both are label-only, same traversal order).
-                assert_eq!(my_q.preorder, ref_q.preorder, "preorder mismatch for {a}");
-                assert_eq!(my_q.postorder, ref_q.postorder, "postorder mismatch for {a}");
+                assert_eq!(my_q.preorder, hashes(&ref_q.preorder), "preorder mismatch for {a}");
+                assert_eq!(my_q.postorder, hashes(&ref_q.postorder), "postorder mismatch for {a}");
                 assert_eq!(my_q.tree_size, ref_q.tree_size, "tree_size mismatch for {a}");
 
                 for &k in &[0usize, 1, 2, 3, 5, 10, 50] {
-                    let mine = bounded_sed(&my_q, &my_c, k);
+                    let mine = bounded_sed_int(&my_q, &my_c, k);
                     let reference = bounded_sed(&ref_q, &ref_c, k);
                     assert_eq!(
                         mine, reference,
@@ -234,7 +237,7 @@ mod sed_plain_unit_tests {
                 let exact = crate::tree_ed(ta(a), ta(b));
                 let q_idx = uti(a).sed_plain_build_sed_index();
                 let c_idx = uti(b).sed_plain_build_sed_index();
-                let lb = bounded_sed(&q_idx, &c_idx, 100_000) as i32;
+                let lb = bounded_sed_int(&q_idx, &c_idx, 100_000) as i32;
                 assert!(
                     lb <= exact,
                     "plain SED LB {lb} exceeds exact TED {exact} for ({a}, {b})"

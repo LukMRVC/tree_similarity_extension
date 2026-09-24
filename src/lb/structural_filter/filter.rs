@@ -156,7 +156,7 @@ mod tests {
     use std::ffi::CString;
 
     use super::*;
-    use crate::parsing::parse_tree;
+    use crate::parsing::{label_hash, parse_tree};
     use crate::types::tree_structural::{
         LabelSetConverter, LabelSetElement, LabelSetElementBase, SplitStructuralVec,
         StructuralFilter, StructuralVec,
@@ -173,23 +173,23 @@ mod tests {
         let sets = sc.create(&v);
         let lse_for_a = LabelSetElement {
             base: LabelSetElementBase {
-                id: "a".to_string(),
+                id: label_hash(b"a"),
                 weight: 3,
                 weigh_so_far: 0,
             },
             struct_vec: vec![
                 StructuralVec {
-                    label_id: "a".to_string(),
+                    label_id: label_hash(b"a"),
                     mapping_regions: [3, 2, 1, 0],
                     postorder_id: 4,
                 },
                 StructuralVec {
-                    label_id: "a".to_string(),
+                    label_id: label_hash(b"a"),
                     mapping_regions: [1, 1, 1, 3],
                     postorder_id: 5,
                 },
                 StructuralVec {
-                    label_id: "a".to_string(),
+                    label_id: label_hash(b"a"),
                     mapping_regions: [0, 0, 0, 6],
                     postorder_id: 7,
                 },
@@ -198,31 +198,31 @@ mod tests {
 
         let lse_for_b = LabelSetElement {
             base: LabelSetElementBase {
-                id: "b".to_string(),
+                id: label_hash(b"b"),
                 weight: 3,
                 weigh_so_far: 0,
             },
             struct_vec: vec![
                 StructuralVec {
-                    label_id: "b".to_string(),
+                    label_id: label_hash(b"b"),
                     mapping_regions: [0, 1, 5, 0],
                     postorder_id: 1,
                 },
                 StructuralVec {
-                    label_id: "b".to_string(),
+                    label_id: label_hash(b"b"),
                     mapping_regions: [1, 2, 3, 0],
                     postorder_id: 2,
                 },
                 StructuralVec {
-                    label_id: "b".to_string(),
+                    label_id: label_hash(b"b"),
                     mapping_regions: [5, 1, 0, 0],
                     postorder_id: 6,
                 },
             ],
         };
 
-        assert_eq!(sets[0].1.get("a").unwrap(), &lse_for_a);
-        assert_eq!(sets[0].1.get("b").unwrap(), &lse_for_b);
+        assert_eq!(sets[0].1.get(&label_hash(b"a")).unwrap(), &lse_for_a);
+        assert_eq!(sets[0].1.get(&label_hash(b"b")).unwrap(), &lse_for_b);
     }
 
     #[test]

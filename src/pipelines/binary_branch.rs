@@ -12,13 +12,14 @@
 //! Adaptations for this extension:
 //!   * `ted-lb-bib` walks an `indextree::Arena<LabelId>` (`ParsedTree`, labels
 //!     pre-interned to `i32`). Here we derive the same binary branches straight
-//!     from the `UnifiedTreeIndex` postorder substrate (labels + subtree sizes):
-//!     the topology (children lists) is reconstructed with the same stack scan
-//!     `expand` uses, and node labels (`String`) are interned into a local
-//!     `FxHashMap<String, i32>` shared across the two trees being compared —
-//!     mirroring `LabelId` in the source.
-//!   * The source uses interior mutability (`Cell`/`RefCell`) because its trait
-//!     methods take `&self`; we own the call sites here and use `&mut self`.
+//!     from the `UnifiedTreeIndex` postorder substrate (label hashes + subtree
+//!     sizes): the topology (children lists) is reconstructed with the same
+//!     stack scan `expand` uses, and the stored label hashes play the role of
+//!     `LabelId`.
+//!   * The source interns every branch triple to an `i32` id in a table shared
+//!     by the two trees. Label hashes are global ids, so a triple of hashes is
+//!     itself a global key: branch vectors are keyed by the triple directly and
+//!     each tree is preprocessed on its own, with no shared state.
 //!   * The source's `itertools` usage (`collect_vec`) is replaced with plain std
 //!     iterators (this crate does not depend on `itertools`).
 
@@ -26,15 +27,16 @@ use pgrx::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::lb::ted::topdiff::ted_k;
+use crate::parsing::LabelHash;
 use crate::types::UnifiedTreeIndex;
 
 // ============================================================================
 // Ported binary-branch converter + lower bound (from ted-lb-bib)
 // ============================================================================
 
-/// Multiset of binary-branch ids: bb_id -> occurrence count.
-/// (`ted-lb-bib::BinaryBranchVector`.)
-type BinaryBranchVector = FxHashMap<i32, i32>;
+/// Multiset of binary branches: branch triple -> occurrence count.
+/// (`ted-lb-bib::BinaryBranchVector`, keyed by the triple instead of an id.)
+type BinaryBranchVector = FxHashMap<BbTuple, i32>;
 
 /// A preprocessed tree: node count + its binary-branch vector.
 /// (`ted-lb-bib::BinaryBranchTree`.)
@@ -44,90 +46,31 @@ struct BinaryBranchTree {
 }
 
 /// Binary-branch triple `(root label, left-child label, next-sibling label)`,
-/// each interned to a local `i32` label id. (`ted-lb-bib::BBTuple`.)
-type BbTuple = (i32, Option<i32>, Option<i32>);
+/// each a label hash. (`ted-lb-bib::BBTuple`.)
+type BbTuple = (LabelHash, Option<LabelHash>, Option<LabelHash>);
 
 /// Divisor from the binary-branch theorem: `L1(branch vectors) <= DIVISOR * TED`.
 /// (`ted-base::LowerBoundMethod::DIVISOR` = 5 for `BinaryBranchAlgorithm`.)
 const BIB_DIVISOR: usize = 5;
 
-/// Ported `BinaryBranchAlgorithm`. Owns the tuple→id interning table AND a local
-/// label-string→id table, both SHARED across the two trees of a comparison so
-/// identical triples/labels collapse to the same id (exactly as the source uses
-/// one `BinaryBranchAlgorithm` instance to preprocess both trees).
-#[derive(Default)]
-struct BinaryBranchAlgorithm {
-    next_bb_id: i32,
-    binary_branch_id_map: FxHashMap<BbTuple, i32>,
-    label_ids: FxHashMap<String, i32>,
-    next_label_id: i32,
-}
-
-impl BinaryBranchAlgorithm {
-    /// Local label interning (`String` -> `i32`), mirroring the pre-interned
-    /// `LabelId` of the source's `ParsedTree`.
-    fn bib_intern_label(&mut self, label: &str) -> i32 {
-        if let Some(&id) = self.label_ids.get(label) {
-            return id;
-        }
-        let id = self.next_label_id;
-        self.next_label_id += 1;
-        self.label_ids.insert(label.to_owned(), id);
-        id
+/// Port of `BinaryBranchAlgorithm::preprocess` + `create_vector` for a single
+/// tree, computed from the `UnifiedTreeIndex` substrate instead of walking an
+/// `indextree::Arena`.
+///
+/// For each node `i` (postorder), the binary branch is
+/// `(label(i), label(first child of i), label(next sibling of i))` — matching
+/// the source, where `create_vector` passes each child its immediate right
+/// sibling's label and reads its own first child's label.
+fn bib_preprocess(uti: &UnifiedTreeIndex) -> BinaryBranchTree {
+    let n = uti.tree_size;
+    let mut branch_vector: BinaryBranchVector = FxHashMap::default();
+    if n == 0 {
+        return BinaryBranchTree { size: 0, branch_vector };
     }
-
-    /// Get-or-insert the id for a binary-branch triple. Mirrors the source's
-    /// `entry(bb_tuple).or_insert_with(|| { self.bb_id += 1; self.bb_id })`
-    /// (ids start at 1; the exact numbering is irrelevant, only that it is
-    /// consistent across both trees).
-    fn bib_id_for(&mut self, tuple: BbTuple) -> i32 {
-        if let Some(&id) = self.binary_branch_id_map.get(&tuple) {
-            return id;
-        }
-        self.next_bb_id += 1;
-        let id = self.next_bb_id;
-        self.binary_branch_id_map.insert(tuple, id);
-        id
+    for tuple in uti.bib_branch_tuples() {
+        *branch_vector.entry(tuple).or_insert(0) += 1;
     }
-
-    /// Port of `BinaryBranchAlgorithm::preprocess` + `create_vector` for a single
-    /// tree, computed from the `UnifiedTreeIndex` substrate instead of walking an
-    /// `indextree::Arena`.
-    ///
-    /// For each node `i` (postorder), the binary branch is
-    /// `(label(i), label(first child of i), label(next sibling of i))` — matching
-    /// the source, where `create_vector` passes each child its immediate right
-    /// sibling's label and reads its own first child's label.
-    fn bib_preprocess(&mut self, uti: &UnifiedTreeIndex) -> BinaryBranchTree {
-        let n = uti.tree_size;
-        let mut branch_vector: BinaryBranchVector = FxHashMap::default();
-        if n == 0 {
-            return BinaryBranchTree { size: 0, branch_vector };
-        }
-
-        let children = uti.bib_children();
-
-        // Intern all node labels once (shared table across both trees).
-        let label_ids: Vec<i32> = (0..n).map(|i| self.bib_intern_label(&uti.labels[i])).collect();
-
-        // right_sib[v] = the node immediately to v's right under the same parent.
-        let mut right_sib: Vec<Option<usize>> = vec![None; n];
-        for kids in &children {
-            for w in kids.windows(2) {
-                right_sib[w[0]] = Some(w[1]);
-            }
-        }
-
-        for i in 0..n {
-            let left_label = children[i].first().map(|&c| label_ids[c]);
-            let right_label = right_sib[i].map(|c| label_ids[c]);
-            let tuple: BbTuple = (label_ids[i], left_label, right_label);
-            let id = self.bib_id_for(tuple);
-            branch_vector.entry(id).and_modify(|count| *count += 1).or_insert(1);
-        }
-
-        BinaryBranchTree { size: n, branch_vector }
-    }
+    BinaryBranchTree { size: n, branch_vector }
 }
 
 /// Port of `BinaryBranchAlgorithm::lower_bound`. Returns the binary-branch
@@ -155,6 +98,28 @@ fn bib_lower_bound(query: &BinaryBranchTree, data: &BinaryBranchTree, threshold:
 }
 
 impl UnifiedTreeIndex {
+    /// The binary-branch triple of every node, in postorder.
+    fn bib_branch_tuples(&self) -> Vec<BbTuple> {
+        let n = self.tree_size;
+        let children = self.bib_children();
+
+        // right_sib[v] = the node immediately to v's right under the same parent.
+        let mut right_sib: Vec<Option<usize>> = vec![None; n];
+        for kids in &children {
+            for w in kids.windows(2) {
+                right_sib[w[0]] = Some(w[1]);
+            }
+        }
+
+        (0..n)
+            .map(|i| {
+                let left = children[i].first().map(|&c| self.labels[c]);
+                let right = right_sib[i].map(|c| self.labels[c]);
+                (self.labels[i], left, right)
+            })
+            .collect()
+    }
+
     /// Reconstruct the left→right children list of every node from the postorder
     /// `{labels, sizes}` substrate, using the same stack scan as `expand`: node
     /// `i`'s direct children are the stack entries whose subtree sizes sum to
@@ -222,48 +187,21 @@ fn binary_branch_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex,
     if query.tree_size == 0 || cand.tree_size == 0 {
         return query.tree_size.max(cand.tree_size) as i32;
     }
-    // Stage 1 — binary-branch lower bound. One shared algorithm instance interns
-    // triples/labels consistently across both trees. Filtered iff dist > 5·k.
-    let mut algo = BinaryBranchAlgorithm::default();
-    let q_bb = algo.bib_preprocess(&query);
-    let c_bb = algo.bib_preprocess(&cand);
+    // Stage 1 — binary-branch lower bound. Filtered iff dist > 5·k.
+    let q_bb = bib_preprocess(&query);
+    let c_bb = bib_preprocess(&cand);
     if bib_lower_bound(&q_bb, &c_bb, k_usize) > BIB_DIVISOR * k_usize {
         return k + 1;
     }
-    // Stage 2 — exact bounded TopDiff. One shared label dictionary across both
-    // trees so the interned label ids agree. Discard the SED-struct halves.
-    let mut dict = rustc_hash::FxHashMap::default();
-    let (_q_sed, q_td) = query.expand(&mut dict);
-    let (_c_sed, c_td) = cand.expand(&mut dict);
+    // Stage 2 — exact bounded TopDiff. Discard the SED-struct halves.
+    let (_q_sed, q_td) = query.expand();
+    let (_c_sed, c_td) = cand.expand();
     ted_k(&q_td, &c_td, k)
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
-
-#[cfg(test)]
-impl UnifiedTreeIndex {
-    /// Test-only: the binary-branch triple of every node as label strings
-    /// (postorder), for hand-computed port-fidelity checks.
-    fn bib_branch_tuples_str(&self) -> Vec<(String, Option<String>, Option<String>)> {
-        let n = self.tree_size;
-        let children = self.bib_children();
-        let mut right_sib: Vec<Option<usize>> = vec![None; n];
-        for kids in &children {
-            for w in kids.windows(2) {
-                right_sib[w[0]] = Some(w[1]);
-            }
-        }
-        (0..n)
-            .map(|i| {
-                let left = children[i].first().map(|&c| self.labels[c].clone());
-                let right = right_sib[i].map(|c| self.labels[c].clone());
-                (self.labels[i].clone(), left, right)
-            })
-            .collect()
-    }
-}
 
 /// Test-only cross-check: the same distance computed as an explicit L1 sum over
 /// the two branch vectors (port of `tree-statistics`'s `ted_l1`). Must agree with
@@ -290,7 +228,7 @@ fn bib_lower_bound_l1(query: &BinaryBranchTree, data: &BinaryBranchTree, thresho
 #[cfg(test)]
 mod binary_branch_unit_tests {
     use super::*;
-    use crate::parsing::parse_tree;
+    use crate::parsing::{label_hash, parse_tree};
     use crate::types::TreeArena;
     use std::ffi::CString;
 
@@ -317,6 +255,9 @@ mod binary_branch_unit_tests {
     fn empty() -> UnifiedTreeIndex {
         UnifiedTreeIndex { labels: vec![], sizes: vec![], tree_size: 0 }
     }
+    fn h(label: &str) -> LabelHash {
+        label_hash(label.as_bytes())
+    }
 
     /// `⌈dist / DIVISOR⌉` — the actual integer lower bound on TED that the
     /// binary-branch distance implies.
@@ -331,8 +272,8 @@ mod binary_branch_unit_tests {
     /// Singleton `{a}`: root has no child and no sibling → `(a, None, None)`.
     #[test]
     fn triples_singleton() {
-        let tuples = uti("{a}").bib_branch_tuples_str();
-        assert_eq!(tuples, vec![("a".to_owned(), None, None)]);
+        let tuples = uti("{a}").bib_branch_tuples();
+        assert_eq!(tuples, vec![(h("a"), None, None)]);
     }
 
     /// `{a{b}{c}}` (postorder b, c, a):
@@ -341,13 +282,13 @@ mod binary_branch_unit_tests {
     ///   a — first child b, root    → (a, Some b, None)
     #[test]
     fn triples_bushy() {
-        let tuples = uti("{a{b}{c}}").bib_branch_tuples_str();
+        let tuples = uti("{a{b}{c}}").bib_branch_tuples();
         assert_eq!(
             tuples,
             vec![
-                ("b".to_owned(), None, Some("c".to_owned())),
-                ("c".to_owned(), None, None),
-                ("a".to_owned(), Some("b".to_owned()), None),
+                (h("b"), None, Some(h("c"))),
+                (h("c"), None, None),
+                (h("a"), Some(h("b")), None),
             ]
         );
     }
@@ -358,13 +299,13 @@ mod binary_branch_unit_tests {
     ///   a — first child b, root    → (a, Some b, None)
     #[test]
     fn triples_chain() {
-        let tuples = uti("{a{b{c}}}").bib_branch_tuples_str();
+        let tuples = uti("{a{b{c}}}").bib_branch_tuples();
         assert_eq!(
             tuples,
             vec![
-                ("c".to_owned(), None, None),
-                ("b".to_owned(), Some("c".to_owned()), None),
-                ("a".to_owned(), Some("b".to_owned()), None),
+                (h("c"), None, None),
+                (h("b"), Some(h("c")), None),
+                (h("a"), Some(h("b")), None),
             ]
         );
     }
@@ -375,9 +316,8 @@ mod binary_branch_unit_tests {
     fn source_example_distance() {
         let a = uti("{a{b{c}{d}}{b{c}{d}}{e}}");
         let b = uti("{a{b{c}{d}{b{e}}}{c}{d}{e}}");
-        let mut algo = BinaryBranchAlgorithm::default();
-        let a_bb = algo.bib_preprocess(&a);
-        let b_bb = algo.bib_preprocess(&b);
+        let a_bb = bib_preprocess(&a);
+        let b_bb = bib_preprocess(&b);
 
         let sym = bib_lower_bound(&a_bb, &b_bb, usize::MAX);
         let l1 = bib_lower_bound_l1(&a_bb, &b_bb, usize::MAX);
@@ -391,14 +331,12 @@ mod binary_branch_unit_tests {
     fn self_distance_zero_and_vector_totals() {
         for &s in TREES {
             let t = uti(s);
-            let mut algo = BinaryBranchAlgorithm::default();
-            let bb = algo.bib_preprocess(&t);
+            let bb = bib_preprocess(&t);
             let total: i32 = bb.branch_vector.values().sum();
             assert_eq!(total as usize, t.tree_size, "vector total != node count for {s}");
             // Self-comparison: identical vectors → distance 0.
-            let mut algo2 = BinaryBranchAlgorithm::default();
-            let x = algo2.bib_preprocess(&uti(s));
-            let y = algo2.bib_preprocess(&uti(s));
+            let x = bib_preprocess(&uti(s));
+            let y = bib_preprocess(&uti(s));
             assert_eq!(bib_lower_bound(&x, &y, usize::MAX), 0, "self distance != 0 for {s}");
         }
     }
@@ -412,9 +350,8 @@ mod binary_branch_unit_tests {
         for &a in TREES {
             for &b in TREES {
                 let exact = crate::tree_ed(ta(a), ta(b)) as usize;
-                let mut algo = BinaryBranchAlgorithm::default();
-                let a_bb = algo.bib_preprocess(&uti(a));
-                let b_bb = algo.bib_preprocess(&uti(b));
+                let a_bb = bib_preprocess(&uti(a));
+                let b_bb = bib_preprocess(&uti(b));
                 // Huge threshold so the sentinel never fires: raw distance.
                 let dist = bib_lower_bound(&a_bb, &b_bb, usize::MAX);
                 let lb = lb_from_dist(dist);

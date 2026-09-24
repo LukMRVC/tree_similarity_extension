@@ -1,26 +1,15 @@
 use pgrx::{prelude::*, PostgresType};
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::{parsing::parse_tree, types::tree_internals::id::NodeId, TreeArena};
-
-/// Local label-interning dictionary used to translate string labels to i32 for
-/// fast comparisons during SED/SED-STRUCT computation. Built fresh per call.
-pub type LabelDict = FxHashMap<String, i32>;
-
-#[inline]
-fn intern(dict: &mut LabelDict, label: &str) -> i32 {
-    if let Some(&id) = dict.get(label) {
-        return id;
-    }
-    let id = dict.len() as i32;
-    dict.insert(label.to_owned(), id);
-    id
-}
+use crate::{
+    parsing::{label_hash, parse_tree, LabelHash},
+    types::tree_internals::id::NodeId,
+    TreeArena,
+};
 
 /// Trait abstracting a structural traversal character so the DP loop can be
 /// generic over both `TraversalCharacter` (string label) and
-/// `TraversalCharacterInt` (interned i32 label).
+/// `TraversalCharacterInt` (hashed label).
 pub trait StructCell {
     type Label: PartialEq;
     fn label(&self) -> &Self::Label;
@@ -141,7 +130,7 @@ fn string_edit_distance(s1: &[String], s2: &[String]) -> usize {
     result
 }
 
-fn bounded_string_edit_distance(s1: &[String], s2: &[String], k: usize) -> usize {
+fn bounded_string_edit_distance<T: PartialEq>(s1: &[T], s2: &[T], k: usize) -> usize {
     use std::cmp::{max, min};
     // assumes size of s2 is smaller or equal than s1
     let mut s1len = s1.len();
@@ -710,29 +699,28 @@ pub fn bounded_string_edit_distance_with_structure<T: StructCell>(
 }
 
 // ============================================================================
-// Integer-based variants — labels interned via a local LabelDict for fast
-// PartialEq during the inner DP loop. Built per-call from two TreeArenas.
-// These types are NOT exposed as Postgres types because the interning is only
-// meaningful within a single comparison.
+// Integer-based variants — labels are their `label_hash` (u64), so the inner DP
+// loop compares integers instead of strings. The hash is a global label id, so
+// each tree is indexed on its own; no dictionary is shared between the two.
 // ============================================================================
 
 #[derive(Debug)]
 pub struct SEDIndexInt {
-    pub preorder: Vec<i32>,
-    pub postorder: Vec<i32>,
+    pub preorder: Vec<LabelHash>,
+    pub postorder: Vec<LabelHash>,
     pub tree_size: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraversalCharacterInt {
-    pub label: i32,
+    pub label: LabelHash,
     pub sum: i32,
     pub diff: i32,
 }
 
 impl StructCell for TraversalCharacterInt {
-    type Label = i32;
-    #[inline] fn label(&self) -> &i32 { &self.label }
+    type Label = LabelHash;
+    #[inline] fn label(&self) -> &LabelHash { &self.label }
     #[inline] fn sum(&self) -> i32 { self.sum }
     #[inline] fn diff(&self) -> i32 { self.diff }
 }
@@ -744,26 +732,20 @@ pub struct SEDStructIndexInt {
     pub tree_size: usize,
 }
 
-/// Build two integer-interned SEDIndexInt's sharing the same local dictionary.
+/// Build the hashed-label SEDIndexInt of both trees.
 pub fn build_sed_indices_int(t1: &TreeArena, t2: &TreeArena) -> (SEDIndexInt, SEDIndexInt) {
-    let mut dict: LabelDict = FxHashMap::default();
-    let i1 = sed_index_int(t1, &mut dict);
-    let i2 = sed_index_int(t2, &mut dict);
-    (i1, i2)
+    (sed_index_int(t1), sed_index_int(t2))
 }
 
-/// Build two integer-interned SEDStructIndexInt's sharing the same local dictionary.
+/// Build the hashed-label SEDStructIndexInt of both trees.
 pub fn build_sed_struct_indices_int(
     t1: &TreeArena,
     t2: &TreeArena,
 ) -> (SEDStructIndexInt, SEDStructIndexInt) {
-    let mut dict: LabelDict = FxHashMap::default();
-    let i1 = sed_struct_index_int(t1, &mut dict);
-    let i2 = sed_struct_index_int(t2, &mut dict);
-    (i1, i2)
+    (sed_struct_index_int(t1), sed_struct_index_int(t2))
 }
 
-fn sed_index_int(tree: &TreeArena, dict: &mut LabelDict) -> SEDIndexInt {
+fn sed_index_int(tree: &TreeArena) -> SEDIndexInt {
     let Some(root) = tree.iter().next() else {
         panic!("Unable to get root but tree is not empty!");
     };
@@ -772,7 +754,7 @@ fn sed_index_int(tree: &TreeArena, dict: &mut LabelDict) -> SEDIndexInt {
     let mut pre = Vec::with_capacity(tree.count());
     let mut post = Vec::with_capacity(tree.count());
 
-    traverse_int(root_id, tree, dict, &mut pre, &mut post);
+    traverse_int(root_id, tree, &mut pre, &mut post);
 
     SEDIndexInt {
         tree_size: tree.count(),
@@ -784,20 +766,18 @@ fn sed_index_int(tree: &TreeArena, dict: &mut LabelDict) -> SEDIndexInt {
 fn traverse_int(
     nid: NodeId,
     tree: &TreeArena,
-    dict: &mut LabelDict,
-    pre: &mut Vec<i32>,
-    post: &mut Vec<i32>,
+    pre: &mut Vec<LabelHash>,
+    post: &mut Vec<LabelHash>,
 ) {
-    let label = tree.get(nid).unwrap().get();
-    let id = intern(dict, label);
+    let id = label_hash(tree.get(nid).unwrap().get().as_bytes());
     pre.push(id);
     for cnid in nid.children(tree) {
-        traverse_int(cnid, tree, dict, pre, post);
+        traverse_int(cnid, tree, pre, post);
     }
     post.push(id);
 }
 
-fn sed_struct_index_int(tree: &TreeArena, dict: &mut LabelDict) -> SEDStructIndexInt {
+fn sed_struct_index_int(tree: &TreeArena) -> SEDStructIndexInt {
     let Some(root) = tree.iter().next() else {
         panic!("Unable to get root but tree is not empty!");
     };
@@ -813,7 +793,6 @@ fn sed_struct_index_int(tree: &TreeArena, dict: &mut LabelDict) -> SEDStructInde
         root_id,
         tree,
         tree_size,
-        dict,
         &mut preorder,
         &mut reversed_postorder,
         &mut postorder_id,
@@ -833,7 +812,6 @@ fn traverse_with_info_int(
     nid: NodeId,
     tree: &TreeArena,
     tree_size: usize,
-    dict: &mut LabelDict,
     preorder: &mut Vec<TraversalCharacterInt>,
     reversed_postorder: &mut Vec<TraversalCharacterInt>,
     postorder_id: &mut usize,
@@ -842,8 +820,7 @@ fn traverse_with_info_int(
     let mut subtree_size = 1;
     *depth += 1;
 
-    let label = tree.get(nid).unwrap().get();
-    let id = intern(dict, label);
+    let id = label_hash(tree.get(nid).unwrap().get().as_bytes());
 
     let pre_idx = preorder.len();
     preorder.push(TraversalCharacterInt { label: id, sum: 0, diff: 0 });
@@ -854,7 +831,6 @@ fn traverse_with_info_int(
             cnid,
             tree,
             tree_size,
-            dict,
             preorder,
             reversed_postorder,
             postorder_id,
@@ -879,6 +855,26 @@ fn traverse_with_info_int(
     rev_post.diff = ancestor - preceding as i32;
 
     subtree_size
+}
+
+/// `bounded_sed` over hashed labels: the same algorithm and return convention,
+/// only the label type differs.
+pub fn bounded_sed_int(t1: &SEDIndexInt, t2: &SEDIndexInt, k: usize) -> usize {
+    if t1.tree_size.abs_diff(t2.tree_size) > k {
+        return k + 1;
+    }
+    let (mut t1, mut t2) = (t1, t2);
+    if t1.preorder.len() > t2.preorder.len() {
+        (t1, t2) = (t2, t1);
+    }
+    let k = k + 1;
+    let pre_dist = bounded_string_edit_distance(&t1.preorder, &t2.preorder, k);
+    if pre_dist > k {
+        return pre_dist;
+    }
+    let post_dist = bounded_string_edit_distance(&t1.postorder, &t2.postorder, k);
+
+    std::cmp::max(pre_dist, post_dist)
 }
 
 pub fn bounded_sed_opt_int(t1: &SEDIndexInt, t2: &SEDIndexInt, k: usize) -> usize {

@@ -3,13 +3,15 @@
 //! Built test-first against the retained C++ oracle `cppffi::tree_topdiff_bounded`.
 //! See `docs/superpowers/plans/2026-05-24-unified-tree-index-pipeline.md` (Track A).
 
+use crate::parsing::{label_hash, LabelHash};
+
 /// Rust equivalent of C++ `node::TreeIndexTouzetKRSet`. All vectors are indexed
 /// by left-to-right POSTORDER id (`0..tree_size`).
 ///
 /// INVARIANTS (must hold for both the reference builder in this module and the
 /// production `expand` in `crate::types::unified_tree_index` — differential
 /// tested at the A/B seam):
-///   * labels are interned to `i32` against a dict SHARED with the SED form
+///   * labels are their `label_hash` (global ids, the same values as the SED form)
 ///   * `postl_to_size`: subtree node count; leaf == 1
 ///   * `postl_to_depth`: root depth == 0
 ///   * `postl_to_lch`: leftmost-child postorder id; LEAF == -1
@@ -18,7 +20,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopDiffIndex {
     pub tree_size: i32,
-    pub postl_to_label_id: Vec<i32>,
+    pub postl_to_label_id: Vec<LabelHash>,
     pub postl_to_size: Vec<i32>,
     pub postl_to_depth: Vec<i32>,
     pub postl_to_lch: Vec<i32>,
@@ -91,13 +93,11 @@ impl TopDiffIndex {
     /// Reference builder. Ports `node::index_tree` / `index_tree_recursion` for
     /// the `TreeIndexTouzetKRSet` subset of indices, plus `fill_kr_ancestors`.
     ///
-    /// Labels are interned into `dict` (get-or-insert: id = existing or
-    /// `dict.len()`), matching `sed::intern`, so the resulting label ids are
-    /// shared with the SED forms when the same dict is threaded through.
-    pub fn from_tree(tree: &crate::types::TreeArena, dict: &mut crate::lb::sed::LabelDict) -> Self {
+    /// Labels are hashed with `label_hash`, the same ids the SED forms use.
+    pub fn from_tree(tree: &crate::types::TreeArena) -> Self {
         let tree_size = tree.count();
 
-        let mut postl_to_label_id = vec![0i32; tree_size];
+        let mut postl_to_label_id: Vec<LabelHash> = vec![0; tree_size];
         let mut postl_to_size = vec![0i32; tree_size];
         let mut postl_to_depth = vec![0i32; tree_size];
         let mut postl_to_lch = vec![-1i32; tree_size];
@@ -111,7 +111,6 @@ impl TopDiffIndex {
             Self::recurse(
                 root,
                 tree,
-                dict,
                 0, // start_depth: root depth == 0
                 &mut next_postorder,
                 &mut postl_to_label_id,
@@ -152,10 +151,9 @@ impl TopDiffIndex {
     fn recurse(
         nid: crate::types::tree_internals::id::NodeId,
         tree: &crate::types::TreeArena,
-        dict: &mut crate::lb::sed::LabelDict,
         depth: i32,
         next_postorder: &mut i32,
-        postl_to_label_id: &mut [i32],
+        postl_to_label_id: &mut [LabelHash],
         postl_to_size: &mut [i32],
         postl_to_depth: &mut [i32],
         postl_to_lch: &mut [i32],
@@ -169,7 +167,6 @@ impl TopDiffIndex {
             let child_size = Self::recurse(
                 cnid,
                 tree,
-                dict,
                 depth + 1,
                 next_postorder,
                 postl_to_label_id,
@@ -193,15 +190,7 @@ impl TopDiffIndex {
         // Now *next_postorder holds this node's postorder id.
         let this_postorder = *next_postorder as usize;
 
-        let label = tree.get(nid).unwrap().get();
-        // Inline intern (sed::intern is private): get-or-insert.
-        let label_id = if let Some(&id) = dict.get(label) {
-            id
-        } else {
-            let id = dict.len() as i32;
-            dict.insert(label.to_owned(), id);
-            id
-        };
+        let label_id = label_hash(tree.get(nid).unwrap().get().as_bytes());
 
         postl_to_label_id[this_postorder] = label_id;
         postl_to_size[this_postorder] = desc_sum + 1;
@@ -250,7 +239,7 @@ pub fn k_relevant(t1: &TopDiffIndex, t2: &TopDiffIndex, x: i32, y: i32, k: i32) 
 
 /// Unit cost model. `del == ins == 1.0`; `ren(a,b) == 0.0` iff label ids match.
 #[inline]
-fn cost_ren(a: i32, b: i32) -> f64 {
+fn cost_ren(a: LabelHash, b: LabelHash) -> f64 {
     if a == b {
         0.0
     } else {
@@ -463,7 +452,6 @@ pub fn ted_k(t1: &TopDiffIndex, t2: &TopDiffIndex, k: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lb::sed::LabelDict;
     use crate::parsing::parse_tree;
     use crate::types::TreeArena;
 
@@ -473,10 +461,9 @@ mod tests {
         parse_tree(std::ffi::CString::new(s).unwrap().as_c_str()).unwrap()
     }
 
-    /// Build a TopDiffIndex from a bracket string with a fresh dict.
+    /// Build a TopDiffIndex from a bracket string.
     fn build(s: &str) -> TopDiffIndex {
-        let mut dict = LabelDict::default();
-        TopDiffIndex::from_tree(&pt(s), &mut dict)
+        TopDiffIndex::from_tree(&pt(s))
     }
 
     fn sorted(v: &[i32]) -> Vec<i32> {
@@ -545,10 +532,8 @@ mod tests {
 
     /// Run tree_dist on the root pair of two trees with a generous budget.
     fn tree_dist_roots(s1: &str, s2: &str, k: i32, e: i32) -> f64 {
-        let mut d1 = LabelDict::default();
-        let t1 = TopDiffIndex::from_tree(&pt(s1), &mut d1);
-        let mut d2 = d1.clone();
-        let t2 = TopDiffIndex::from_tree(&pt(s2), &mut d2);
+        let t1 = TopDiffIndex::from_tree(&pt(s1));
+        let t2 = TopDiffIndex::from_tree(&pt(s2));
         let mut state = TopDiffState::new(t1.tree_size, k);
         let x = t1.tree_size - 1;
         let y = t2.tree_size - 1;
@@ -571,11 +556,10 @@ mod tests {
         assert_eq!(tree_dist_roots("{a{b}}", "{a}", 4, 4), 1.0);
     }
 
-    /// Parse both strings, build both indices against ONE shared dict, run ted_k.
+    /// Parse both strings, build both indices, run ted_k.
     fn ted_pair(s1: &str, s2: &str, k: i32) -> i32 {
-        let mut dict = LabelDict::default();
-        let t1 = TopDiffIndex::from_tree(&pt(s1), &mut dict);
-        let t2 = TopDiffIndex::from_tree(&pt(s2), &mut dict);
+        let t1 = TopDiffIndex::from_tree(&pt(s1));
+        let t2 = TopDiffIndex::from_tree(&pt(s2));
         ted_k(&t1, &t2, k)
     }
 
@@ -667,9 +651,8 @@ mod tests {
         let mut checked = 0usize;
         for (s1, s2) in &pairs {
             for &k in &ks {
-                let mut dict = LabelDict::default();
-                let t1 = TopDiffIndex::from_tree(&pt(s1), &mut dict);
-                let t2 = TopDiffIndex::from_tree(&pt(s2), &mut dict);
+                let t1 = TopDiffIndex::from_tree(&pt(s1));
+                let t2 = TopDiffIndex::from_tree(&pt(s2));
                 let got = ted_k(&t1, &t2, k);
                 let want = oracle(s1, s2, k);
                 assert_eq!(

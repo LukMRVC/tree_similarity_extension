@@ -2,7 +2,7 @@ use pgrx::{InOutFuncs, PostgresType};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::parsing::{parse_tree, LabelId, ParsedTree};
+use crate::parsing::{label_hash, parse_tree, LabelId, ParsedTree};
 
 use super::{tree_internals::id::NodeId, TreeArena};
 
@@ -132,8 +132,8 @@ impl LabelSetConverter {
             let mut postorder_id = 0;
 
             for n in root_id.descendants(tree) {
-                let root_label = tree.get(n).unwrap().get();
-                let split_id = split(root_label);
+                let root_label = label_hash(tree.get(n).unwrap().get().as_bytes());
+                let split_id = split(&root_label);
                 self.tree_size_by_split_id[split_id] += 1;
             }
 
@@ -244,8 +244,8 @@ impl LabelSetConverter {
         // number of children = subtree_size - 1
         // subtree_size = 1 -> actual node + sum of children
         let mut subtree_size = [0; Self::MAX_SPLIT];
-        let root_label = tree.get(*root_id).unwrap().get();
-        let split_id = split(root_label);
+        let root_label = label_hash(tree.get(*root_id).unwrap().get().as_bytes());
+        let split_id = split(&root_label);
         subtree_size[split_id] = 1;
 
         self.actual_depth[split_id] += 1;
@@ -286,7 +286,7 @@ impl LabelSetConverter {
 
         let node_struct_vec = SplitStructuralVec {
             svec: StructuralVec {
-                label_id: root_label.clone(),
+                label_id: root_label,
                 postorder_id: *postorder_id,
                 mapping_regions,
                 ..Default::default()
@@ -294,20 +294,20 @@ impl LabelSetConverter {
             mapping_region_splits: mapping_splits,
         };
 
-        if let Some(se) = record_labels.get_mut(root_label) {
+        if let Some(se) = record_labels.get_mut(&root_label) {
             se.base.weight += 1;
             se.struct_vec.push(node_struct_vec);
         } else {
             let mut se = SplitLabelSetElement {
                 base: LabelSetElementBase {
-                    id: tree.get(*root_id).unwrap().get().clone(),
+                    id: root_label,
                     weight: 1,
                     ..LabelSetElementBase::default()
                 },
                 ..Default::default()
             };
             se.struct_vec.push(node_struct_vec);
-            record_labels.insert(root_label.clone(), se);
+            record_labels.insert(root_label, se);
         }
         subtree_size
     }
@@ -333,10 +333,10 @@ impl LabelSetConverter {
         self.actual_depth[0] -= 1;
         self.actual_pre_order_number[0] += 1;
 
-        let root_label = tree.get(*root_id).unwrap().get();
+        let root_label = label_hash(tree.get(*root_id).unwrap().get().as_bytes());
         let node_struct_vec = StructuralVec {
             postorder_id: *postorder_id,
-            label_id: root_label.clone(),
+            label_id: root_label,
             mapping_regions: [
                 (self.actual_pre_order_number[0] - subtree_size),
                 self.actual_depth[0],
@@ -346,20 +346,20 @@ impl LabelSetConverter {
             ],
         };
 
-        if let Some(se) = record_labels.get_mut(root_label) {
+        if let Some(se) = record_labels.get_mut(&root_label) {
             se.base.weight += 1;
             se.struct_vec.push(node_struct_vec);
         } else {
             let mut se = LabelSetElement {
                 base: LabelSetElementBase {
-                    id: tree.get(*root_id).unwrap().get().clone(),
+                    id: root_label,
                     weight: 1,
                     ..LabelSetElementBase::default()
                 },
                 ..LabelSetElement::default()
             };
             se.struct_vec.push(node_struct_vec);
-            record_labels.insert(root_label.clone(), se);
+            record_labels.insert(root_label, se);
         }
         subtree_size
     }

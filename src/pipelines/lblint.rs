@@ -9,6 +9,7 @@
 use pgrx::prelude::*;
 
 use crate::lb::ted::topdiff::ted_k;
+use crate::parsing::LabelHash;
 use crate::types::UnifiedTreeIndex;
 
 // ---------------------------------------------------------------------------
@@ -47,16 +48,16 @@ impl UnifiedTreeIndex {
             (other, self)
         };
 
-        let mut counts: rustc_hash::FxHashMap<&str, i32> = rustc_hash::FxHashMap::default();
-        for l in &small.labels {
-            *counts.entry(l.as_str()).or_insert(0) += 1;
+        let mut counts: rustc_hash::FxHashMap<LabelHash, i32> = rustc_hash::FxHashMap::default();
+        for &l in &small.labels {
+            *counts.entry(l).or_insert(0) += 1;
         }
 
         let mut intersection = 0i32;
         let mut remaining = large.labels.len() as i32;
         for l in &large.labels {
             remaining -= 1;
-            if let Some(cnt) = counts.get_mut(l.as_str()) {
+            if let Some(cnt) = counts.get_mut(l) {
                 if *cnt > 0 {
                     *cnt -= 1;
                     intersection += 1;
@@ -82,8 +83,8 @@ impl UnifiedTreeIndex {
 /// single pre-indexed `UnifiedTreeIndex` column. Each argument's CBOR is
 /// deserialized once; Stage 1 (cheap label-intersection lower bound) is computed
 /// directly from the substrate's postorder label multisets, and only survivors
-/// are interned into one shared dictionary, expanded into the TopDiff working
-/// form, and run through Stage 2 (exact bounded TopDiff).
+/// are expanded into the TopDiff working form and run through Stage 2 (exact
+/// bounded TopDiff).
 ///
 /// Returns the TopDiff distance when the pair passes both stages (`<= k`),
 /// otherwise `k + 1` (over-bound), composable with `<= k` filters in SQL.
@@ -109,11 +110,10 @@ fn lblint_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k: i32
     if query.lblint_bounded_lb(&cand, k) > k {
         return k + 1;
     }
-    // Stage 2 — exact bounded TopDiff. One shared label dictionary across both
-    // trees; discard the SED halves. `ted_k` already returns k+1 on over-bound.
-    let mut dict = rustc_hash::FxHashMap::default();
-    let (_q_sed, q_td) = query.expand(&mut dict);
-    let (_c_sed, c_td) = cand.expand(&mut dict);
+    // Stage 2 — exact bounded TopDiff; discard the SED halves. `ted_k` already
+    // returns k+1 on over-bound.
+    let (_q_sed, q_td) = query.expand();
+    let (_c_sed, c_td) = cand.expand();
     ted_k(&q_td, &c_td, k)
 }
 

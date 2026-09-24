@@ -155,9 +155,9 @@ fn treearena_to_sed_struct_index(t1: TreeArena) -> SEDStructIndex {
 }
 
 // ---------------------------------------------------------------------------
-// Integer-interned variants — build a local label→i32 dictionary from the two
-// input trees, then compute bounded SED / SED-STRUCT on i32 slices. i32
-// PartialEq is much cheaper than String::eq in the inner DP loop.
+// Hashed-label variants — each label becomes its `label_hash` (u64), then
+// bounded SED / SED-STRUCT run on integer slices. Integer PartialEq is much
+// cheaper than String::eq in the inner DP loop.
 // ---------------------------------------------------------------------------
 
 #[pg_extern(immutable, parallel_safe, cost = 1500)]
@@ -224,9 +224,10 @@ fn tree_topdiff_bounded_ed(t1: TreeArena, t2: TreeArena, k: i32) -> i32 {
 
 /// Combined SED-Struct LB filter → TopDiff verification pipeline over a single
 /// pre-indexed `UnifiedTreeIndex` column. Each argument's CBOR is deserialized
-/// once; both trees are interned into one shared dictionary, expanded into the
-/// SED and TopDiff working forms, then run through Stage 1 (cheap SED-Struct
-/// lower bound) and — only on survivors — Stage 2 (exact bounded TopDiff).
+/// once and expanded into the SED and TopDiff working forms (labels are the
+/// stored label hashes, so no dictionary is built), then run through Stage 1
+/// (cheap SED-Struct lower bound) and — only on survivors — Stage 2 (exact
+/// bounded TopDiff).
 ///
 /// Returns the TopDiff distance when the pair passes both stages (`<= k`),
 /// otherwise `k + 1` (over-bound), composable with `<= k` filters in SQL.
@@ -247,12 +248,9 @@ fn sed_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k: i32) -
     if query.tree_size == 0 || cand.tree_size == 0 {
         return query.tree_size.max(cand.tree_size) as i32;
     }
-    // One shared label dictionary across both trees and both working forms, so
-    // Stage 1 and Stage 2 agree on which labels are equal.
-    let mut dict = rustc_hash::FxHashMap::default();
-    let (q_sed, q_td) = query.expand(&mut dict);
-    let (c_sed, c_td) = cand.expand(&mut dict);
-    // Stage 1 — SED-Struct lower bound (interned i32). Filtered out if LB > k.
+    let (q_sed, q_td) = query.expand();
+    let (c_sed, c_td) = cand.expand();
+    // Stage 1 — SED-Struct lower bound (hashed labels). Filtered out if LB > k.
     if bounded_sed_struct_int(&q_sed, &c_sed, k_usize + 1) > k_usize {
         return k + 1;
     }
@@ -388,7 +386,7 @@ mod tests {
 //
 // Compares the two SED-STRUCT bounded LB implementations head-to-head:
 //   * tree_lb_bounded_sed_struct      — String-labelled SEDStructIndex path
-//   * tree_lb_bounded_sed_struct_int  — i32-interned SEDStructIndexInt path
+//   * tree_lb_bounded_sed_struct_int  — hashed-label SEDStructIndexInt path
 //
 // The timed closure mirrors the body of each #[pg_extern] wrapper exactly
 // (index build + bounded DP). Parsing the bracket string into a TreeArena is
@@ -417,7 +415,7 @@ mod benches {
     // Realistic edit-distance threshold (matches the dataset's thresholds, ~9-12).
     const K_REALISTIC: usize = 11;
     // Large threshold: defeats early short-circuits so the full DP runs and the
-    // i32-vs-String inner-loop comparison cost dominates.
+    // hash-vs-String inner-loop comparison cost dominates.
     const K_LARGE: usize = 500;
 
     /// Parse the embedded bracket strings into a fresh `TreeArena` pair.
@@ -512,8 +510,8 @@ mod benches {
         );
     }
 
-    /// Baseline: the two stages built and run separately (no shared substrate /
-    /// dict), mirroring two independently-composed `#[pg_extern]` calls.
+    /// Baseline: the two stages built and run separately (no shared substrate),
+    /// mirroring two independently-composed `#[pg_extern]` calls.
     #[pg_bench]
     fn bench_separate_pipeline(b: &mut Bencher) {
         b.iter_batched(
@@ -524,10 +522,8 @@ mod benches {
                 let out = if lb > K_REALISTIC {
                     K_PIPE + 1
                 } else {
-                    let mut d1 = rustc_hash::FxHashMap::default();
-                    let td1 = TopDiffIndex::from_tree(&t1, &mut d1);
-                    let mut d2 = rustc_hash::FxHashMap::default();
-                    let td2 = TopDiffIndex::from_tree(&t2, &mut d2);
+                    let td1 = TopDiffIndex::from_tree(&t1);
+                    let td2 = TopDiffIndex::from_tree(&t2);
                     ted_k(&td1, &td2, K_PIPE)
                 };
                 black_box(out)

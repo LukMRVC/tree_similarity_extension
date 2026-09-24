@@ -19,6 +19,7 @@ pg_bench = ["dep:pgrx-bench"]
 memchr = "2.7.4"
 pgrx = "0.19.1"
 rustc-hash = "2.0.0"
+twox-hash = { version = "2.1.4", default-features = false, features = ["std", "xxhash3_64"] }
 serde = { version = "1.0.207", features = ["derive"] }
 thiserror = "2.0.18"
 cxx = { version = "1.0.126", features = ["c++17"] }

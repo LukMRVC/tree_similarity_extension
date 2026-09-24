@@ -8,21 +8,25 @@
 use pgrx::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::parsing::parse_tree;
-use crate::lb::sed::{LabelDict, SEDStructIndexInt, TraversalCharacterInt};
+use crate::parsing::{label_hash, walk_bracket, BracketVisitor, LabelHash, TreeParseError};
+use crate::lb::sed::{SEDStructIndexInt, TraversalCharacterInt};
 use crate::lb::ted::topdiff::TopDiffIndex;
 use crate::types::tree_internals::id::NodeId;
 use crate::TreeArena;
 
-/// Postorder substrate: labels + subtree sizes (+ count). Postorder ids together
-/// with subtree sizes uniquely determine the tree, so node depths, left-child
-/// links, and the SED `sum`/`diff` annotations are all derived in the per-call
-/// `expand` pass rather than stored — keeping the CBOR payload small.
+/// Postorder substrate: label hashes + subtree sizes (+ count). Postorder ids
+/// together with subtree sizes uniquely determine the tree, so node depths,
+/// left-child links, and the SED `sum`/`diff` annotations are all derived in the
+/// per-call `expand` pass rather than stored — keeping the CBOR payload small.
+///
+/// Labels are stored as their [`label_hash`], computed once while parsing. The
+/// hash is a global label id, so two trees can be compared without building a
+/// shared label dictionary.
 #[derive(Debug, Clone, PartialEq, Eq, PostgresType, Serialize, Deserialize)]
 #[inoutfuncs]
 pub struct UnifiedTreeIndex {
-    pub labels: Vec<String>, // postorder
-    pub sizes: Vec<i32>,     // postorder subtree sizes
+    pub labels: Vec<LabelHash>, // postorder
+    pub sizes: Vec<i32>,        // postorder subtree sizes
     pub tree_size: usize,
 }
 
@@ -49,17 +53,69 @@ impl From<TreeArena> for UnifiedTreeIndex {
 fn collect_postorder(
     nid: NodeId,
     tree: &TreeArena,
-    labels: &mut Vec<String>,
+    labels: &mut Vec<LabelHash>,
     sizes: &mut Vec<i32>,
 ) -> i32 {
     let mut sz = 1i32;
     for cnid in nid.children(tree) {
         sz += collect_postorder(cnid, tree, labels, sizes);
     }
-    let label = tree.get(nid).unwrap().get().clone();
-    labels.push(label);
+    labels.push(label_hash(tree.get(nid).unwrap().get().as_bytes()));
     sizes.push(sz);
     sz
+}
+
+/// Emits nodes in postorder as they close: a node's label hash and subtree size
+/// are known once its closing brace is reached.
+struct PostorderBuilder {
+    /// Open nodes: (label hash, size of the subtree seen so far).
+    open: Vec<(LabelHash, i32)>,
+    labels: Vec<LabelHash>,
+    sizes: Vec<i32>,
+}
+
+impl BracketVisitor for PostorderBuilder {
+    fn open(&mut self, label: &[u8]) {
+        self.open.push((label_hash(label), 1));
+    }
+
+    fn close(&mut self) {
+        let Some((hash, size)) = self.open.pop() else {
+            return;
+        };
+        self.labels.push(hash);
+        self.sizes.push(size);
+        if let Some(parent) = self.open.last_mut() {
+            parent.1 += size;
+        }
+    }
+}
+
+impl UnifiedTreeIndex {
+    /// Parse bracket notation straight into the postorder substrate, hashing each
+    /// label as it is read — no `TreeArena` and no `String` per label.
+    ///
+    /// Tokenizes with the same `walk_bracket` as `parse_tree`, so the result
+    /// equals `UnifiedTreeIndex::from(parse_tree(input)?)`, including for nodes
+    /// left unclosed at the end of the input (closed implicitly here).
+    pub fn parse(input: &core::ffi::CStr) -> Result<Self, TreeParseError> {
+        let bytes = input.to_bytes();
+        let mut builder = PostorderBuilder {
+            open: Vec::new(),
+            labels: Vec::with_capacity(bytes.len() / 3),
+            sizes: Vec::with_capacity(bytes.len() / 3),
+        };
+        walk_bracket(bytes, &mut builder)?;
+        while !builder.open.is_empty() {
+            builder.close();
+        }
+        let tree_size = builder.labels.len();
+        Ok(Self {
+            labels: builder.labels,
+            sizes: builder.sizes,
+            tree_size,
+        })
+    }
 }
 
 impl InOutFuncs for UnifiedTreeIndex {
@@ -67,12 +123,13 @@ impl InOutFuncs for UnifiedTreeIndex {
     where
         Self: Sized,
     {
-        Self::from(parse_tree(input).expect("failed to parse input tree"))
+        Self::parse(input).expect("failed to parse input tree")
     }
 
     fn output(&self, buffer: &mut pgrx::StringInfo) {
-        // Debug rendering: "label1,label2,...:size1,size2,..."
-        buffer.push_str(&self.labels.join(","));
+        // Debug rendering: "hash1,hash2,...:size1,size2,..." (hashes in hex).
+        let label_strs: Vec<String> = self.labels.iter().map(|h| format!("{h:016x}")).collect();
+        buffer.push_str(&label_strs.join(","));
         buffer.push_str(":");
         let size_strs: Vec<String> = self.sizes.iter().map(|s| s.to_string()).collect();
         buffer.push_str(&size_strs.join(","));
@@ -84,10 +141,10 @@ impl InOutFuncs for UnifiedTreeIndex {
 // ============================================================================
 
 impl UnifiedTreeIndex {
-    /// Expand the postorder substrate into the two pipeline working forms,
-    /// interning all labels into the shared `dict` (cross-tree label-id
-    /// consistency, exactly like `build_sed_struct_indices_int` sharing one dict).
-    pub fn expand(&self, dict: &mut LabelDict) -> (SEDStructIndexInt, TopDiffIndex) {
+    /// Expand the postorder substrate into the two pipeline working forms. Label
+    /// ids are the stored label hashes, which are globally consistent, so no
+    /// dictionary is shared between the two trees being compared.
+    pub fn expand(&self) -> (SEDStructIndexInt, TopDiffIndex) {
         let n = self.tree_size;
         assert_eq!(self.labels.len(), n);
         assert_eq!(self.sizes.len(), n);
@@ -177,15 +234,10 @@ impl UnifiedTreeIndex {
         //   rev_post.sum  = preceding + ancestor
         //   rev_post.diff = ancestor - preceding
         //
-        // CRITICAL: intern labels in preorder visit order (same as
-        // traverse_with_info_int, which descends into each node before children).
+        // Label ids are the stored hashes (see `label_hash`).
         // ------------------------------------------------------------------
 
-        // Intern labels in preorder order.
-        let mut label_ids: Vec<i32> = vec![0; n];
-        for &node in &preorder_nodes {
-            label_ids[node] = intern_local(dict, &self.labels[node]);
-        }
+        let label_ids = &self.labels;
 
         let mut first_traversal: Vec<TraversalCharacterInt> = Vec::with_capacity(n);
         let mut second_traversal_rev: Vec<TraversalCharacterInt> = Vec::with_capacity(n);
@@ -226,7 +278,7 @@ impl UnifiedTreeIndex {
         // Step 3: Build TopDiffIndex.
         //
         // INVARIANTS (from topdiff.rs):
-        //   * labels interned to i32 against shared dict  (done above)
+        //   * labels are the global label hashes (see `label_hash`)
         //   * postl_to_size: subtree node count; leaf == 1
         //   * postl_to_depth: root depth == 0
         //   * postl_to_lch: leftmost-child postorder id; LEAF == -1
@@ -235,7 +287,7 @@ impl UnifiedTreeIndex {
         // ------------------------------------------------------------------
 
         // postl_to_size and postl_to_depth are directly available.
-        let postl_to_label_id = label_ids.clone();
+        let postl_to_label_id = self.labels.clone();
         let postl_to_size: Vec<i32> = self.sizes.clone();
         let postl_to_depth = depth.clone();
 
@@ -289,17 +341,6 @@ impl UnifiedTreeIndex {
     }
 }
 
-/// Inline intern: lookup or insert into dict, returning the i32 id.
-#[inline]
-fn intern_local(dict: &mut LabelDict, label: &str) -> i32 {
-    if let Some(&id) = dict.get(label) {
-        return id;
-    }
-    let id = dict.len() as i32;
-    dict.insert(label.to_owned(), id);
-    id
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -309,10 +350,15 @@ mod tests {
     use super::*;
     use crate::lb::sed::bounded_sed_struct_int;
     use crate::lb::ted::topdiff::TopDiffIndex;
-    use rustc_hash::FxHashMap;
+    use crate::parsing::parse_tree;
+    use std::ffi::CString;
 
     fn pt(s: &str) -> TreeArena {
-        parse_tree(std::ffi::CString::new(s).unwrap().as_c_str()).unwrap()
+        parse_tree(CString::new(s).unwrap().as_c_str()).unwrap()
+    }
+
+    fn h(label: &str) -> LabelHash {
+        label_hash(label.as_bytes())
     }
 
     // -----------------------------------------------------------------------
@@ -323,9 +369,49 @@ mod tests {
     fn unified_from_tree_postorder() {
         let t = pt("{a{b}{c}}");
         let u = UnifiedTreeIndex::from(t);
-        assert_eq!(u.labels, vec!["b", "c", "a"]);
+        assert_eq!(u.labels, vec![h("b"), h("c"), h("a")]);
         assert_eq!(u.sizes, vec![1, 1, 3]);
         assert_eq!(u.tree_size, 3);
+    }
+
+    /// The hashing parser must produce exactly what the reference path
+    /// (`parse_tree` → `From<TreeArena>`) does, including escaped braces, text
+    /// after a closing brace (ignored), and nodes left unclosed at the end.
+    #[test]
+    fn parse_matches_from_tree_arena() {
+        let cases = [
+            "{a}",
+            "{a{b}}",
+            "{a{b}{c}}",
+            "{a{b{e}}{c}}",
+            "{r{a{b}{c}}{d{e}}}",
+            "{1{2}{3{4}}}",
+            "{a b{c d}{}}",
+            r"{a\{b}",
+            r"{a\}b}",
+            r"{a\\}b}",
+            r"{a{b\}}{c}}",
+            "{a{b}c}",
+            "{a{b}{c}",
+            "{a{b{c}",
+            "{x{y}{z}}trailing",
+        ];
+        for s in cases {
+            let c = CString::new(s).unwrap();
+            let parsed = UnifiedTreeIndex::parse(c.as_c_str()).unwrap();
+            let reference = UnifiedTreeIndex::from(parse_tree(c.as_c_str()).unwrap());
+            assert_eq!(parsed, reference, "parse vs From<TreeArena> mismatch for {s}");
+        }
+    }
+
+    /// Both parsers reject the same malformed inputs.
+    #[test]
+    fn parse_rejects_what_parse_tree_rejects() {
+        for s in [r"\{a}", "{a}}", "{a}{b}", "{a}{"] {
+            let c = CString::new(s).unwrap();
+            assert!(parse_tree(c.as_c_str()).is_err(), "parse_tree accepted {s}");
+            assert!(UnifiedTreeIndex::parse(c.as_c_str()).is_err(), "parse accepted {s}");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -339,9 +425,8 @@ mod tests {
         let (ref1, ref2) = crate::lb::sed::build_sed_struct_indices_int(&t1, &t2);
         let u1 = UnifiedTreeIndex::from(t1);
         let u2 = UnifiedTreeIndex::from(t2);
-        let mut dict = FxHashMap::default();
-        let (sed1, _td1) = u1.expand(&mut dict);
-        let (sed2, _td2) = u2.expand(&mut dict);
+        let (sed1, _td1) = u1.expand();
+        let (sed2, _td2) = u2.expand();
         assert_eq!(sed1.first_traversal, ref1.first_traversal);
         assert_eq!(sed1.second_traversal, ref1.second_traversal);
         assert_eq!(sed2.first_traversal, ref2.first_traversal);
@@ -360,8 +445,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Reference TopDiffIndex builder direct from a TreeArena, honoring all
-    /// TopDiffIndex invariants. Labels interned in preorder order to match expand.
-    fn reference_topdiff_index(tree: &TreeArena, dict: &mut LabelDict) -> TopDiffIndex {
+    /// TopDiffIndex invariants. Labels are hashed with `label_hash`.
+    fn reference_topdiff_index(tree: &TreeArena) -> TopDiffIndex {
         let n = tree.count();
 
         let root = tree.iter().next().expect("tree non-empty");
@@ -400,11 +485,11 @@ mod tests {
             }
         }
 
-        // Intern labels in preorder order (mirrors expand).
-        let mut postl_to_label_id: Vec<i32> = vec![0; n];
+        // Label ids are the label hashes.
+        let mut postl_to_label_id: Vec<LabelHash> = vec![0; n];
         for &nid in &preorder_ids {
             let label = tree.get(nid).unwrap().get();
-            let id = intern_local(dict, label);
+            let id = label_hash(label.as_bytes());
             postl_to_label_id[nid_to_postl[&nid]] = id;
         }
 
@@ -497,12 +582,10 @@ mod tests {
         for s in &["{a}", "{a{b}{c}}", "{a{b{d}}{c}}"] {
             let t = pt(s);
 
-            let mut d1: LabelDict = FxHashMap::default();
-            let ref_td = reference_topdiff_index(&t, &mut d1);
+            let ref_td = reference_topdiff_index(&t);
 
-            let mut d2: LabelDict = FxHashMap::default();
             let u = UnifiedTreeIndex::from(t);
-            let (_sed, td) = u.expand(&mut d2);
+            let (_sed, td) = u.expand();
 
             assert_eq!(td.tree_size, ref_td.tree_size, "tree_size mismatch for {}", s);
             assert_eq!(td.postl_to_label_id, ref_td.postl_to_label_id, "label_id mismatch for {}", s);
