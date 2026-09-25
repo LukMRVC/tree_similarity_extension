@@ -1,6 +1,6 @@
 create table if not exists tree_ds(
     id int generated always as identity,
-    tree treearena not null
+    tree tree not null
 );
 
 INSERT INTO tree_ds(tree) VALUES

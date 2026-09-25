@@ -1,7 +1,7 @@
 create table if not exists tree_select_ds(
     id int generated always as identity,
     threshold int,
-    query_tree treearena
+    query_tree tree
 );
 
 insert into
@@ -815,7 +815,7 @@ create table if not exists inverted_select_ds(
     query_tree invertedtree
 );
 
-insert into inverted_select_ds select id, threshold, treearena_to_inverted_label_list(query_tree) from tree_select_ds;
+insert into inverted_select_ds select id, threshold, tree_to_inverted_label_list(query_tree) from tree_select_ds;
 
 
 create table if not exists sed_select_ds(
@@ -824,7 +824,7 @@ create table if not exists sed_select_ds(
     query_tree sedindex
 );
 
-insert into sed_select_ds select id, threshold, treearena_to_sed_index(query_tree) from tree_select_ds;
+insert into sed_select_ds select id, threshold, tree_to_sed_index(query_tree) from tree_select_ds;
 
 create table if not exists sf_select_ds(
     id int ,
@@ -832,5 +832,5 @@ create table if not exists sf_select_ds(
     query_tree structuralfilter
 );
 
-insert into sf_select_ds select id, threshold, treearena_to_structural_filter_tuple(query_tree) from tree_select_ds;
+insert into sf_select_ds select id, threshold, tree_to_structural_filter_tuple(query_tree) from tree_select_ds;
 

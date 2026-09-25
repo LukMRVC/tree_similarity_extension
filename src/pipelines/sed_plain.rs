@@ -10,7 +10,7 @@ use pgrx::prelude::*;
 
 use crate::lb::sed::{bounded_sed_int, SEDIndexInt};
 use crate::lb::ted::topdiff::ted_k;
-use crate::types::UnifiedTreeIndex;
+use crate::types::{Tree, UnifiedTreeIndex};
 
 // ============================================================================
 // Substrate → plain SEDIndexInt (hashed-label) construction
@@ -99,7 +99,11 @@ impl UnifiedTreeIndex {
 /// Sound: plain SED on the label traversals is a true lower bound on TED, so
 /// `LB > k ⇒ TED > k`.
 #[pg_extern(immutable, parallel_safe, cost = 5000)]
-fn sed_plain_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k: i32) -> i32 {
+fn sed_plain_topdiff_within(query: Tree, cand: Tree, k: i32) -> i32 {
+    sed_plain_within(&query.to_unified(), &cand.to_unified(), k)
+}
+
+pub fn sed_plain_within(query: &UnifiedTreeIndex, cand: &UnifiedTreeIndex, k: i32) -> i32 {
     if k < 0 {
         return k + 1;
     }
@@ -167,6 +171,9 @@ mod sed_plain_unit_tests {
     fn uti(s: &str) -> UnifiedTreeIndex {
         UnifiedTreeIndex::from(ta(s))
     }
+    fn tr(s: &str) -> crate::types::Tree {
+        crate::types::Tree::parse(s).unwrap()
+    }
     fn empty() -> UnifiedTreeIndex {
         UnifiedTreeIndex {
             labels: vec![],
@@ -215,13 +222,13 @@ mod sed_plain_unit_tests {
     fn acceptance_gate_matches_exact_ted() {
         for &a in TREES {
             for &b in TREES {
-                let exact = crate::tree_ed(ta(a), ta(b));
+                let exact = crate::tree_ed(tr(a), tr(b));
                 for &k in &[0i32, 1, 2, 3, 7, 50] {
                     let expected = if exact <= k { exact } else { k + 1 };
-                    let got = sed_plain_topdiff_within(uti(a), uti(b), k);
+                    let got = sed_plain_within(&uti(a), &uti(b), k);
                     assert_eq!(
                         got, expected,
-                        "sed_plain_topdiff_within({a}, {b}, {k}) = {got}, expected {expected} (exact TED {exact})"
+                        "sed_plain_within({a}, {b}, {k}) = {got}, expected {expected} (exact TED {exact})"
                     );
                 }
             }
@@ -234,7 +241,7 @@ mod sed_plain_unit_tests {
     fn stage1_lb_is_sound() {
         for &a in TREES {
             for &b in TREES {
-                let exact = crate::tree_ed(ta(a), ta(b));
+                let exact = crate::tree_ed(tr(a), tr(b));
                 let q_idx = uti(a).sed_plain_build_sed_index();
                 let c_idx = uti(b).sed_plain_build_sed_index();
                 let lb = bounded_sed_int(&q_idx, &c_idx, 100_000) as i32;
@@ -250,20 +257,20 @@ mod sed_plain_unit_tests {
     #[test]
     fn edge_cases() {
         // Two empty trees: TED 0.
-        assert_eq!(sed_plain_topdiff_within(empty(), empty(), 3), 0);
+        assert_eq!(sed_plain_within(&empty(), &empty(), 3), 0);
         // Empty vs 3-node tree within budget: TED 3.
-        assert_eq!(sed_plain_topdiff_within(empty(), uti("{a{b}{c}}"), 5), 3);
+        assert_eq!(sed_plain_within(&empty(), &uti("{a{b}{c}}"), 5), 3);
         // Empty vs 3-node tree, budget too small: k+1.
-        assert_eq!(sed_plain_topdiff_within(empty(), uti("{a{b}{c}}"), 1), 2);
+        assert_eq!(sed_plain_within(&empty(), &uti("{a{b}{c}}"), 1), 2);
         // Empty on the candidate side too (symmetry).
-        assert_eq!(sed_plain_topdiff_within(uti("{a{b}{c}}"), empty(), 5), 3);
+        assert_eq!(sed_plain_within(&uti("{a{b}{c}}"), &empty(), 5), 3);
         // Negative k is always over-bound (returns k+1).
-        assert_eq!(sed_plain_topdiff_within(uti("{a}"), uti("{a}"), -1), 0);
-        assert_eq!(sed_plain_topdiff_within(uti("{a{b}{c}}"), uti("{x{y}{z}}"), -3), -2);
+        assert_eq!(sed_plain_within(&uti("{a}"), &uti("{a}"), -1), 0);
+        assert_eq!(sed_plain_within(&uti("{a{b}{c}}"), &uti("{x{y}{z}}"), -3), -2);
         // Identical trees at k=0: TED 0.
         for &a in TREES {
             assert_eq!(
-                sed_plain_topdiff_within(uti(a), uti(a), 0),
+                sed_plain_within(&uti(a), &uti(a), 0),
                 0,
                 "identical {a} at k=0 should be 0"
             );
@@ -277,17 +284,17 @@ mod sed_plain_unit_tests {
     fn off_by_one_probes() {
         for &a in TREES {
             for &b in TREES {
-                let d = crate::tree_ed(ta(a), ta(b));
+                let d = crate::tree_ed(tr(a), tr(b));
                 if d < 1 {
                     continue;
                 }
                 assert_eq!(
-                    sed_plain_topdiff_within(uti(a), uti(b), d),
+                    sed_plain_within(&uti(a), &uti(b), d),
                     d,
                     "k=d={d} should return d for ({a}, {b})"
                 );
                 assert_eq!(
-                    sed_plain_topdiff_within(uti(a), uti(b), d - 1),
+                    sed_plain_within(&uti(a), &uti(b), d - 1),
                     d,
                     "k=d-1={} should return d={d} (over-bound) for ({a}, {b})",
                     d - 1
@@ -307,13 +314,13 @@ mod tests {
     #[pg_test]
     fn sed_plain_sql_round_trip() {
         let same = Spi::get_one::<i32>(
-            "SELECT sed_plain_topdiff_within('{a{b}{c}}'::unifiedtreeindex, '{a{b}{c}}'::unifiedtreeindex, 5)",
+            "SELECT sed_plain_topdiff_within('{a{b}{c}}'::tree, '{a{b}{c}}'::tree, 5)",
         )
         .unwrap()
         .unwrap();
         assert_eq!(same, 0);
         let one = Spi::get_one::<i32>(
-            "SELECT sed_plain_topdiff_within('{a{b}{c}}'::unifiedtreeindex, '{a{b}{x}}'::unifiedtreeindex, 5)",
+            "SELECT sed_plain_topdiff_within('{a{b}{c}}'::tree, '{a{b}{x}}'::tree, 5)",
         )
         .unwrap()
         .unwrap();

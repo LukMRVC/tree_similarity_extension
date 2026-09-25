@@ -1,9 +1,11 @@
+pub mod tree;
 pub mod tree_arena;
 pub mod tree_internals;
 pub mod tree_intersect;
 pub mod tree_structural;
 pub mod unified_tree_index;
 pub use crate::lb::sed::{SEDIndex, SEDStructIndex};
+pub use tree::{Tree, TreeQuery};
 pub use unified_tree_index::UnifiedTreeIndex;
 pub use tree_arena::TreeArena;
 pub use tree_intersect::InvertedTree;

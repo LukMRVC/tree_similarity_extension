@@ -2,6 +2,9 @@
 #
 # Pipeline-search benchmark: every pipeline method x every dataset.
 #
+# Methods named `iam_<lb>` run the query through a `tree_search_iam` index built
+# WITH (lb = <lb>); the others call the pipeline function on every row.
+#
 # Measures wall-clock time of each of the 100 queries per (dataset, method)
 # pair against the full tree collection, timed server-side.
 #
@@ -43,6 +46,11 @@ METHODS=(
   structural_topdiff_within
   binary_branch_topdiff_within
   lblint_topdiff_within
+  iam_sed_struct
+  iam_sed_plain
+  iam_structural
+  iam_binary_branch
+  iam_lblint
 )
 
 SKIP_BUILD=0
@@ -125,11 +133,20 @@ DECLARE
   n  bigint;
 BEGIN
   t0 := clock_timestamp();
-  EXECUTE format(
-    'SELECT count(*) FROM trees_%I t, queries_%I q
-      WHERE q.id = \$1 AND %I(q.tree, t.tree, q.k) <= q.k',
-    p_ds, p_ds, p_method
-  ) INTO n USING p_qid;
+  IF p_method LIKE 'iam\\_%' THEN
+    PERFORM set_config('enable_seqscan', 'off', true);
+    EXECUTE format(
+      'SELECT count(*) FROM trees_%I t, queries_%I q
+        WHERE q.id = \$1 AND t.tree <~ tree_query(q.tree, q.k)',
+      p_ds, p_ds
+    ) INTO n USING p_qid;
+  ELSE
+    EXECUTE format(
+      'SELECT count(*) FROM trees_%I t, queries_%I q
+        WHERE q.id = \$1 AND %I(q.tree, t.tree, q.k) <= q.k',
+      p_ds, p_ds, p_method
+    ) INTO n USING p_qid;
+  END IF;
   t1 := clock_timestamp();
   matches    := n;
   elapsed_ms := extract(epoch FROM (t1 - t0)) * 1000.0;
@@ -175,8 +192,8 @@ load_kind() {
 
 log "=== load phase ==="
 for ds in "${DATASETS[@]}"; do
-  load_kind "$ds" trees   "$DATA_DIR/$ds/trees_sorted.bracket" "trees_$ds"   "id int PRIMARY KEY, tree unifiedtreeindex"
-  load_kind "$ds" queries "$DATA_DIR/$ds/query.csv"            "queries_$ds" "id int PRIMARY KEY, k int NOT NULL, tree unifiedtreeindex"
+  load_kind "$ds" trees   "$DATA_DIR/$ds/trees_sorted.bracket" "trees_$ds"   "id int PRIMARY KEY, tree tree"
+  load_kind "$ds" queries "$DATA_DIR/$ds/query.csv"            "queries_$ds" "id int PRIMARY KEY, k int NOT NULL, tree tree"
 done
 
 if [[ $LOAD_ONLY -eq 1 ]]; then
@@ -203,6 +220,17 @@ for ds in "${DATASETS[@]}"; do
   for m in "${METHODS[@]}"; do
     pair_t0=$(date +%s)
     ran=0
+    todo=0
+    for qid in "${QIDS[@]}"; do
+      [[ -z "${DONE[$ds,$m,$qid]:-}" ]] && todo=$((todo + 1))
+    done
+    # One index per dataset at a time, so the planner can't pick another lb.
+    if [[ $m == iam_* && $todo -gt 0 ]]; then
+      build_t0=$(date +%s)
+      psql_q "DROP INDEX IF EXISTS trees_${ds}_iam;" >/dev/null
+      psql_q "CREATE INDEX trees_${ds}_iam ON trees_$ds USING tree_search_iam (tree) WITH (lb = ${m#iam_});" >/dev/null
+      log "$ds / $m: index built in $(( $(date +%s) - build_t0 ))s"
+    fi
     for qid in "${QIDS[@]}"; do
       [[ -n "${DONE[$ds,$m,$qid]:-}" ]] && continue
       ensure_server || { log "server down and will not start; aborting"; exit 1; }
@@ -217,6 +245,7 @@ for ds in "${DATASETS[@]}"; do
       fi
       ran=$((ran + 1))
     done
+    [[ $m == iam_* ]] && psql_q "DROP INDEX IF EXISTS trees_${ds}_iam;" >/dev/null
     if [[ $ran -gt 0 ]]; then
       log "$ds / $m: $ran queries in $(( $(date +%s) - pair_t0 ))s"
     else

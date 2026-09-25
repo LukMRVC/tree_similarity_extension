@@ -69,7 +69,7 @@ pub(crate) fn walk_bracket(
 ) -> Result<(), TreeParseError> {
     use TreeParseError as TPE;
 
-    if tree_bracket_bytes[0] == TOKEN_ESCAPE {
+    if tree_bracket_bytes.first() == Some(&TOKEN_ESCAPE) {
         return Err(TPE::IncorrectFormat(
             "Tree bracket string starts with escape char \\".to_owned(),
         ));
@@ -81,8 +81,15 @@ pub(crate) fn walk_bracket(
             .collect();
 
     let mut tokens = token_positions.iter().peekable();
-    let root_start = *tokens.next().unwrap();
-    let root_end = **tokens.peek().expect("Root node had not been closed");
+    let Some(&root_start) = tokens.next() else {
+        return Err(TPE::IncorrectFormat("Tree has no root node".to_owned()));
+    };
+    if tree_bracket_bytes[root_start] != TOKEN_OPEN_NODE {
+        return Err(TPE::IncorrectFormat("Tree does not start with {".to_owned()));
+    }
+    let Some(&&root_end) = tokens.peek() else {
+        return Err(TPE::IncorrectFormat("Root node had not been closed".to_owned()));
+    };
 
     visitor.open(&tree_bracket_bytes[(root_start + 1)..root_end]);
     // Number of currently open nodes.

@@ -5,9 +5,6 @@
 //!
 //! See `docs/superpowers/plans/2026-05-24-unified-tree-index-pipeline.md` (Track B).
 
-use pgrx::prelude::*;
-use serde::{Deserialize, Serialize};
-
 use crate::parsing::{label_hash, walk_bracket, BracketVisitor, LabelHash, TreeParseError};
 use crate::lb::sed::{SEDStructIndexInt, TraversalCharacterInt};
 use crate::lb::ted::topdiff::TopDiffIndex;
@@ -17,13 +14,12 @@ use crate::TreeArena;
 /// Postorder substrate: label hashes + subtree sizes (+ count). Postorder ids
 /// together with subtree sizes uniquely determine the tree, so node depths,
 /// left-child links, and the SED `sum`/`diff` annotations are all derived in the
-/// per-call `expand` pass rather than stored — keeping the CBOR payload small.
+/// per-call `expand` pass rather than stored — keeping the index entries small.
 ///
 /// Labels are stored as their [`label_hash`], computed once while parsing. The
 /// hash is a global label id, so two trees can be compared without building a
 /// shared label dictionary.
-#[derive(Debug, Clone, PartialEq, Eq, PostgresType, Serialize, Deserialize)]
-#[inoutfuncs]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnifiedTreeIndex {
     pub labels: Vec<LabelHash>, // postorder
     pub sizes: Vec<i32>,        // postorder subtree sizes
@@ -115,24 +111,6 @@ impl UnifiedTreeIndex {
             sizes: builder.sizes,
             tree_size,
         })
-    }
-}
-
-impl InOutFuncs for UnifiedTreeIndex {
-    fn input(input: &core::ffi::CStr) -> Self
-    where
-        Self: Sized,
-    {
-        Self::parse(input).expect("failed to parse input tree")
-    }
-
-    fn output(&self, buffer: &mut pgrx::StringInfo) {
-        // Debug rendering: "hash1,hash2,...:size1,size2,..." (hashes in hex).
-        let label_strs: Vec<String> = self.labels.iter().map(|h| format!("{h:016x}")).collect();
-        buffer.push_str(&label_strs.join(","));
-        buffer.push_str(":");
-        let size_strs: Vec<String> = self.sizes.iter().map(|s| s.to_string()).collect();
-        buffer.push_str(&size_strs.join(","));
     }
 }
 

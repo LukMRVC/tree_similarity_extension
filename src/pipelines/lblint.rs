@@ -10,7 +10,7 @@ use pgrx::prelude::*;
 
 use crate::lb::ted::topdiff::ted_k;
 use crate::parsing::LabelHash;
-use crate::types::UnifiedTreeIndex;
+use crate::types::{Tree, UnifiedTreeIndex};
 
 // ---------------------------------------------------------------------------
 // Stage 1 — multiset label-intersection lower bound, straight off the substrate.
@@ -90,7 +90,11 @@ impl UnifiedTreeIndex {
 /// otherwise `k + 1` (over-bound), composable with `<= k` filters in SQL.
 /// Sound: label intersection is a true lower bound on TED, so `LB > k ⇒ TED > k`.
 #[pg_extern(immutable, parallel_safe, cost = 5000)]
-fn lblint_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k: i32) -> i32 {
+fn lblint_topdiff_within(query: Tree, cand: Tree, k: i32) -> i32 {
+    lblint_within(&query.to_unified(), &cand.to_unified(), k)
+}
+
+pub fn lblint_within(query: &UnifiedTreeIndex, cand: &UnifiedTreeIndex, k: i32) -> i32 {
     if k < 0 {
         return k + 1;
     }
@@ -148,6 +152,9 @@ mod lblint_unit_tests {
     }
     fn uti(s: &str) -> UnifiedTreeIndex {
         UnifiedTreeIndex::from(ta(s))
+    }
+    fn tr(s: &str) -> crate::types::Tree {
+        crate::types::Tree::parse(s).unwrap()
     }
 
     /// Exact (unbounded) reference label-intersection LB via the existing
@@ -210,7 +217,7 @@ mod lblint_unit_tests {
     fn stage1_lb_is_sound() {
         for &a in TREES {
             for &b in TREES {
-                let exact = crate::tree_ed(ta(a), ta(b));
+                let exact = crate::tree_ed(tr(a), tr(b));
                 let lb = uti(a).lblint_bounded_lb(&uti(b), 1_000_000);
                 assert!(
                     lb <= exact,
@@ -227,13 +234,13 @@ mod lblint_unit_tests {
     fn within_matches_exact_ted() {
         for &a in TREES {
             for &b in TREES {
-                let exact = crate::tree_ed(ta(a), ta(b));
+                let exact = crate::tree_ed(tr(a), tr(b));
                 for &k in &[0i32, 1, 2, 3, 7, 50] {
                     let expected = if exact <= k { exact } else { k + 1 };
-                    let got = super::lblint_topdiff_within(uti(a), uti(b), k);
+                    let got = super::lblint_within(&uti(a), &uti(b), k);
                     assert_eq!(
                         got, expected,
-                        "lblint_topdiff_within({a}, {b}, {k}) = {got}, expected {expected} (exact TED {exact})"
+                        "lblint_within({a}, {b}, {k}) = {got}, expected {expected} (exact TED {exact})"
                     );
                 }
             }
@@ -250,16 +257,16 @@ mod lblint_unit_tests {
             tree_size: 0,
         };
         // Two empty trees: TED 0.
-        assert_eq!(super::lblint_topdiff_within(empty(), empty(), 3), 0);
+        assert_eq!(super::lblint_within(&empty(), &empty(), 3), 0);
         // Empty vs 3-node tree within budget: TED 3.
-        assert_eq!(super::lblint_topdiff_within(empty(), uti("{a{b}{c}}"), 5), 3);
+        assert_eq!(super::lblint_within(&empty(), &uti("{a{b}{c}}"), 5), 3);
         // Empty vs 3-node tree, budget too small: k+1.
-        assert_eq!(super::lblint_topdiff_within(empty(), uti("{a{b}{c}}"), 1), 2);
+        assert_eq!(super::lblint_within(&empty(), &uti("{a{b}{c}}"), 1), 2);
         // Negative k is always over-bound (returns k+1).
-        assert_eq!(super::lblint_topdiff_within(uti("{a}"), uti("{a}"), -1), 0);
+        assert_eq!(super::lblint_within(&uti("{a}"), &uti("{a}"), -1), 0);
         // Identical trees at k=0: exact TED 0.
         assert_eq!(
-            super::lblint_topdiff_within(uti("{a{b}{c}}"), uti("{a{b}{c}}"), 0),
+            super::lblint_within(&uti("{a{b}{c}}"), &uti("{a{b}{c}}"), 0),
             0
         );
     }
@@ -274,22 +281,22 @@ mod lblint_unit_tests {
             ("{a}", "{a{b}{c}}"),       // d = 2
             ("{x{y}{z}}", "{a{b}{c}}"), // fully disjoint labels
         ] {
-            let d = crate::tree_ed(ta(a), ta(b));
+            let d = crate::tree_ed(tr(a), tr(b));
             assert!(d >= 1, "corpus probe ({a},{b}) must have TED >= 1, got {d}");
             assert_eq!(
-                super::lblint_topdiff_within(uti(a), uti(b), d),
+                super::lblint_within(&uti(a), &uti(b), d),
                 d,
                 "k=d ({d}) should return exact d for ({a},{b})"
             );
             assert_eq!(
-                super::lblint_topdiff_within(uti(a), uti(b), d - 1),
+                super::lblint_within(&uti(a), &uti(b), d - 1),
                 d,
                 "k=d-1 ({}) should return k+1 = d ({d}) for ({a},{b})",
                 d - 1
             );
             if d >= 2 {
                 assert_eq!(
-                    super::lblint_topdiff_within(uti(a), uti(b), d - 2),
+                    super::lblint_within(&uti(a), &uti(b), d - 2),
                     d - 1,
                     "k=d-2 ({}) should return k+1 = d-1 for ({a},{b})",
                     d - 2
@@ -315,13 +322,13 @@ mod tests {
     #[pg_test]
     fn lblint_sql_round_trip() {
         let same = Spi::get_one::<i32>(
-            "SELECT lblint_topdiff_within('{a{b}{c}}'::unifiedtreeindex, '{a{b}{c}}'::unifiedtreeindex, 5)",
+            "SELECT lblint_topdiff_within('{a{b}{c}}'::tree, '{a{b}{c}}'::tree, 5)",
         )
         .unwrap()
         .unwrap();
         assert_eq!(same, 0);
         let one = Spi::get_one::<i32>(
-            "SELECT lblint_topdiff_within('{a{b}{c}}'::unifiedtreeindex, '{a{b}{x}}'::unifiedtreeindex, 5)",
+            "SELECT lblint_topdiff_within('{a{b}{c}}'::tree, '{a{b}{x}}'::tree, 5)",
         )
         .unwrap()
         .unwrap();

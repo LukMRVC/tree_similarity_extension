@@ -1,7 +1,5 @@
 use super::tree_internals::{id::NodeId, node::Node};
-use crate::parsing::parse_tree;
 use crate::types::tree_internals::traversals::NodeEdge;
-use pgrx::prelude::*;
 use serde::*;
 use std::fmt::Formatter;
 use std::{
@@ -11,25 +9,11 @@ use std::{
     slice,
 };
 
-#[derive(PostgresType, Serialize, Deserialize, Debug, Default, Eq, PartialEq)]
-#[inoutfuncs]
+#[derive(Serialize, Deserialize, Debug, Default, Eq, PartialEq)]
 pub struct TreeArena {
     nodes: Vec<Node>,
     first_free_slot: Option<usize>,
     last_free_slot: Option<usize>,
-}
-
-impl InOutFuncs for TreeArena {
-    fn input(input: &core::ffi::CStr) -> Self
-    where
-        Self: Sized,
-    {
-        parse_tree(input).expect("failed to parse input tree")
-    }
-
-    fn output(&self, buffer: &mut pgrx::StringInfo) {
-        buffer.push_str(&self.to_string())
-    }
 }
 
 impl TreeArena {

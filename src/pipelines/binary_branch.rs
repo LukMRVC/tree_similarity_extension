@@ -28,7 +28,7 @@ use rustc_hash::FxHashMap;
 
 use crate::lb::ted::topdiff::ted_k;
 use crate::parsing::LabelHash;
-use crate::types::UnifiedTreeIndex;
+use crate::types::{Tree, UnifiedTreeIndex};
 
 // ============================================================================
 // Ported binary-branch converter + lower bound (from ted-lb-bib)
@@ -172,7 +172,11 @@ impl UnifiedTreeIndex {
 /// Sound: the binary-branch distance is a true lower bound on TED, so
 /// `dist > 5·k ⇒ TED > k`.
 #[pg_extern(immutable, parallel_safe, cost = 5000)]
-fn binary_branch_topdiff_within(query: UnifiedTreeIndex, cand: UnifiedTreeIndex, k: i32) -> i32 {
+fn binary_branch_topdiff_within(query: Tree, cand: Tree, k: i32) -> i32 {
+    binary_branch_within(&query.to_unified(), &cand.to_unified(), k)
+}
+
+pub fn binary_branch_within(query: &UnifiedTreeIndex, cand: &UnifiedTreeIndex, k: i32) -> i32 {
     if k < 0 {
         return k + 1;
     }
@@ -251,6 +255,9 @@ mod binary_branch_unit_tests {
     }
     fn uti(s: &str) -> UnifiedTreeIndex {
         UnifiedTreeIndex::from(ta(s))
+    }
+    fn tr(s: &str) -> crate::types::Tree {
+        crate::types::Tree::parse(s).unwrap()
     }
     fn empty() -> UnifiedTreeIndex {
         UnifiedTreeIndex { labels: vec![], sizes: vec![], tree_size: 0 }
@@ -349,7 +356,7 @@ mod binary_branch_unit_tests {
     fn lb_is_sound() {
         for &a in TREES {
             for &b in TREES {
-                let exact = crate::tree_ed(ta(a), ta(b)) as usize;
+                let exact = crate::tree_ed(tr(a), tr(b)) as usize;
                 let a_bb = bib_preprocess(&uti(a));
                 let b_bb = bib_preprocess(&uti(b));
                 // Huge threshold so the sentinel never fires: raw distance.
@@ -371,13 +378,13 @@ mod binary_branch_unit_tests {
     fn within_matches_exact_ted() {
         for &a in TREES {
             for &b in TREES {
-                let exact = crate::tree_ed(ta(a), ta(b));
+                let exact = crate::tree_ed(tr(a), tr(b));
                 for &k in &[0i32, 1, 2, 3, 7, 50] {
                     let expected = if exact <= k { exact } else { k + 1 };
-                    let got = binary_branch_topdiff_within(uti(a), uti(b), k);
+                    let got = binary_branch_within(&uti(a), &uti(b), k);
                     assert_eq!(
                         got, expected,
-                        "binary_branch_topdiff_within({a}, {b}, {k}) = {got}, expected {expected} (exact TED {exact})"
+                        "binary_branch_within({a}, {b}, {k}) = {got}, expected {expected} (exact TED {exact})"
                     );
                 }
             }
@@ -391,15 +398,15 @@ mod binary_branch_unit_tests {
     #[test]
     fn edge_cases() {
         // Two empty trees: TED 0.
-        assert_eq!(binary_branch_topdiff_within(empty(), empty(), 3), 0);
+        assert_eq!(binary_branch_within(&empty(), &empty(), 3), 0);
         // Empty vs 3-node tree within budget: TED 3.
-        assert_eq!(binary_branch_topdiff_within(empty(), uti("{a{b}{c}}"), 5), 3);
+        assert_eq!(binary_branch_within(&empty(), &uti("{a{b}{c}}"), 5), 3);
         // Empty vs 3-node tree, budget too small: k+1.
-        assert_eq!(binary_branch_topdiff_within(empty(), uti("{a{b}{c}}"), 1), 2);
+        assert_eq!(binary_branch_within(&empty(), &uti("{a{b}{c}}"), 1), 2);
         // Negative k is always over-bound (returns k+1).
-        assert_eq!(binary_branch_topdiff_within(uti("{a}"), uti("{a}"), -1), 0);
+        assert_eq!(binary_branch_within(&uti("{a}"), &uti("{a}"), -1), 0);
         // Identical trees at k=0: exact 0.
-        assert_eq!(binary_branch_topdiff_within(uti("{a{b}{c}}"), uti("{a{b}{c}}"), 0), 0);
+        assert_eq!(binary_branch_within(&uti("{a{b}{c}}"), &uti("{a{b}{c}}"), 0), 0);
     }
 
     /// For a pair with exact TED d >= 1: k=d returns d, k=d-1 returns d (=k+1).
@@ -410,15 +417,15 @@ mod binary_branch_unit_tests {
             ("{a}", "{a{b}{c}}"),       // two inserts:  d = 2
             ("{a{b}{c}}", "{x{y}{z}}"), // three relabels: d = 3
         ] {
-            let d = crate::tree_ed(ta(a), ta(b));
+            let d = crate::tree_ed(tr(a), tr(b));
             assert!(d >= 1, "expected TED >= 1 for ({a}, {b}), got {d}");
             assert_eq!(
-                binary_branch_topdiff_within(uti(a), uti(b), d),
+                binary_branch_within(&uti(a), &uti(b), d),
                 d,
                 "k=d exact expected for ({a}, {b}), d={d}"
             );
             assert_eq!(
-                binary_branch_topdiff_within(uti(a), uti(b), d - 1),
+                binary_branch_within(&uti(a), &uti(b), d - 1),
                 d, // == (d-1) + 1 == k+1
                 "k=d-1 over-bound expected for ({a}, {b}), d={d}"
             );
@@ -437,13 +444,13 @@ mod tests {
     #[pg_test]
     fn binary_branch_sql_round_trip() {
         let same = Spi::get_one::<i32>(
-            "SELECT binary_branch_topdiff_within('{a{b}{c}}'::unifiedtreeindex, '{a{b}{c}}'::unifiedtreeindex, 5)",
+            "SELECT binary_branch_topdiff_within('{a{b}{c}}'::tree, '{a{b}{c}}'::tree, 5)",
         )
         .unwrap()
         .unwrap();
         assert_eq!(same, 0);
         let one = Spi::get_one::<i32>(
-            "SELECT binary_branch_topdiff_within('{a{b}{c}}'::unifiedtreeindex, '{a{b}{x}}'::unifiedtreeindex, 5)",
+            "SELECT binary_branch_topdiff_within('{a{b}{c}}'::tree, '{a{b}{x}}'::tree, 5)",
         )
         .unwrap()
         .unwrap();

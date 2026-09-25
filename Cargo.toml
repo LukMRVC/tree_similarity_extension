@@ -37,6 +37,8 @@ panic = "unwind"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+# macOS `strip` can emit a dylib that dyld rejects ("mis-aligned LINKEDIT string pool").
+strip = false
 
 [build-dependencies]
 cxx-build = "1.0"

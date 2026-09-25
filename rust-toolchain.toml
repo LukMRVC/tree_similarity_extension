@@ -1,0 +1,7 @@
+# Pin the toolchain so `cargo`/`cargo pgrx` and rust-analyzer always agree.
+# Skew between the rustc that built target/ and the rustc rust-analyzer uses to
+# load proc-macro dylibs (pgrx-macros, cxxbridge-macro) produces "mismatched ABI"
+# errors that disable semantic analysis. Bump this deliberately, then rebuild.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy", "rust-src"]
