@@ -3,5 +3,5 @@
 # load proc-macro dylibs (pgrx-macros, cxxbridge-macro) produces "mismatched ABI"
 # errors that disable semantic analysis. Bump this deliberately, then rebuild.
 [toolchain]
-channel = "1.96.0"
+channel = "1.98.1"
 components = ["rustfmt", "clippy", "rust-src"]
