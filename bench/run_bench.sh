@@ -3,7 +3,8 @@
 # Pipeline-search benchmark: every pipeline method x every dataset.
 #
 # Methods named `iam_<lb>` run the query through a `tree_search_iam` index built
-# WITH (lb = <lb>); the others call the pipeline function on every row.
+# WITH (lb = <lb>); `iam_<lb>@t<N>` does the same with scan_threads = N. The
+# others call the pipeline function on every row.
 #
 # Measures wall-clock time of each of the 100 queries per (dataset, method)
 # pair against the full tree collection, timed server-side.
@@ -16,6 +17,7 @@
 #   ./bench/run_bench.sh --skip-build         # reuse the installed extension
 #   ./bench/run_bench.sh --only-dataset rna   # repeatable; also --only-method
 #   ./bench/run_bench.sh --load-only          # populate the DBs, run nothing
+#   ./bench/run_bench.sh --only-method iam_lblint@t8   # index scan on 8 threads
 #
 set -euo pipefail
 
@@ -64,7 +66,7 @@ while [[ $# -gt 0 ]]; do
     --load-only)     LOAD_ONLY=1; shift ;;
     --only-dataset)  ONLY_DATASETS+=("$2"); shift 2 ;;
     --only-method)   ONLY_METHODS+=("$2"); shift 2 ;;
-    -h|--help)       sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)       sed -n '2,19p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -218,38 +220,44 @@ log "=== run phase ==="
 for ds in "${DATASETS[@]}"; do
   mapfile -t QIDS < <(psql_q "SELECT id FROM queries_$ds ORDER BY id")
   for m in "${METHODS[@]}"; do
+    # $label (e.g. iam_lblint@t8) is what results.csv records; $m is what
+    # bench_one runs, with the thread count passed as a session setting.
+    label=$m
+    m=${label%@t*}
+    opts=""
+    [[ $label == *@t* ]] && opts="-c tree_search_iam.scan_threads=${label##*@t}"
     pair_t0=$(date +%s)
     ran=0
     todo=0
     for qid in "${QIDS[@]}"; do
-      [[ -z "${DONE[$ds,$m,$qid]:-}" ]] && todo=$((todo + 1))
+      [[ -z "${DONE[$ds,$label,$qid]:-}" ]] && todo=$((todo + 1))
     done
     # One index per dataset at a time, so the planner can't pick another lb.
     if [[ $m == iam_* && $todo -gt 0 ]]; then
       build_t0=$(date +%s)
       psql_q "DROP INDEX IF EXISTS trees_${ds}_iam;" >/dev/null
       psql_q "CREATE INDEX trees_${ds}_iam ON trees_$ds USING tree_search_iam (tree) WITH (lb = ${m#iam_});" >/dev/null
-      log "$ds / $m: index built in $(( $(date +%s) - build_t0 ))s"
+      log "$ds / $label: index built in $(( $(date +%s) - build_t0 ))s"
     fi
     for qid in "${QIDS[@]}"; do
-      [[ -n "${DONE[$ds,$m,$qid]:-}" ]] && continue
+      [[ -n "${DONE[$ds,$label,$qid]:-}" ]] && continue
       ensure_server || { log "server down and will not start; aborting"; exit 1; }
 
       k=$(psql_q "SELECT k FROM queries_$ds WHERE id=$qid")
       ts=$(date -Iseconds)
-      if row=$(psql_q "SELECT matches, round(elapsed_ms::numeric,3) FROM bench_one('$ds','$m',$qid)" 2>>"$LOG"); then
-        echo "$ds,$m,$qid,$k,$row,ok,$ts" >> "$RESULTS"
+      if row=$(PGOPTIONS="$opts" psql_q "SELECT matches, round(elapsed_ms::numeric,3) FROM bench_one('$ds','$m',$qid)" 2>>"$LOG"); then
+        echo "$ds,$label,$qid,$k,$row,ok,$ts" >> "$RESULTS"
       else
-        log "  ERROR $ds/$m/q$qid (see $LOG)"
-        echo "$ds,$m,$qid,$k,,,error,$ts" >> "$RESULTS"
+        log "  ERROR $ds/$label/q$qid (see $LOG)"
+        echo "$ds,$label,$qid,$k,,,error,$ts" >> "$RESULTS"
       fi
       ran=$((ran + 1))
     done
     [[ $m == iam_* ]] && psql_q "DROP INDEX IF EXISTS trees_${ds}_iam;" >/dev/null
     if [[ $ran -gt 0 ]]; then
-      log "$ds / $m: $ran queries in $(( $(date +%s) - pair_t0 ))s"
+      log "$ds / $label: $ran queries in $(( $(date +%s) - pair_t0 ))s"
     else
-      log "$ds / $m: already complete, skipped"
+      log "$ds / $label: already complete, skipped"
     fi
   done
 done

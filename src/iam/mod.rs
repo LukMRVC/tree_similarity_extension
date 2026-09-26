@@ -13,10 +13,17 @@ mod build;
 mod cost;
 mod insert;
 pub mod options;
+mod parallel;
 mod scan;
 mod storage;
 
 use pgrx::prelude::*;
+
+/// Register the index's reloptions and GUCs. Runs once per backend, from `_PG_init`.
+pub fn register() {
+    options::register();
+    scan::register_guc();
+}
 
 #[pg_extern(sql = "
     CREATE FUNCTION tree_search_iam_handler(internal) RETURNS index_am_handler
@@ -116,6 +123,13 @@ mod tests {
         Spi::run("SET LOCAL enable_seqscan = off").unwrap();
     }
 
+    fn scan_threads(n: usize) {
+        Spi::run(&format!("SET LOCAL tree_search_iam.scan_threads = {n}")).unwrap();
+    }
+
+    /// Thread counts the scan tests run with: inline, and on spawned threads.
+    const THREADS: [usize; 2] = [1, 4];
+
     /// Rows with TED <= k by the C++ oracle, over a plain seq scan.
     fn expected(table: &str, q: &str, k: i32) -> Vec<i32> {
         ids(&format!(
@@ -154,16 +168,17 @@ mod tests {
             ))
             .unwrap();
             force_index();
-            for q in TREES {
-                let q = q.replace('\'', "''");
-                for k in [0, 1, 2, 3, 5] {
-                    let query = format!("SELECT id FROM t_all WHERE tree <~ tree_query('{q}', {k})");
-                    assert!(
-                        explain(&query).contains("Bitmap Index Scan on t_all_idx"),
-                        "index not used for lb={name}:\n{}",
-                        explain(&query)
-                    );
-                    assert_eq!(ids(&query), expected("t_all", &q, k), "lb={name} q={q} k={k}");
+            let plan = explain("SELECT id FROM t_all WHERE tree <~ tree_query('{a}', 1)");
+            assert!(plan.contains("Bitmap Index Scan on t_all_idx"), "index not used for lb={name}:\n{plan}");
+            for threads in THREADS {
+                scan_threads(threads);
+                for q in TREES {
+                    let q = q.replace('\'', "''");
+                    for k in [0, 1, 2, 3, 5] {
+                        let query = format!("SELECT id FROM t_all WHERE tree <~ tree_query('{q}', {k})");
+                        let msg = format!("lb={name} q={q} k={k} threads={threads}");
+                        assert_eq!(ids(&query), expected("t_all", &q, k), "{msg}");
+                    }
                 }
             }
             Spi::run("RESET enable_seqscan").unwrap();
@@ -180,18 +195,21 @@ mod tests {
         Spi::run("INSERT INTO q_join SELECT id, id % 4, tree FROM t_join").unwrap();
         Spi::run("CREATE INDEX t_join_idx ON t_join USING tree_search_iam (tree)").unwrap();
         force_index();
-        let got = Spi::get_one::<i64>(
-            "SELECT count(*) FROM q_join q, t_join t WHERE t.tree <~ tree_query(q.tree, q.k)",
-        )
-        .unwrap()
-        .unwrap();
         let want = Spi::get_one::<i64>(
             "SELECT count(*) FROM q_join q, t_join t
              WHERE tree_topdiff_bounded_ed(t.tree, q.tree, q.k) <= q.k",
         )
         .unwrap()
         .unwrap();
-        assert_eq!(got, want);
+        for threads in THREADS {
+            scan_threads(threads);
+            let got = Spi::get_one::<i64>(
+                "SELECT count(*) FROM q_join q, t_join t WHERE t.tree <~ tree_query(q.tree, q.k)",
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(got, want, "threads={threads}");
+        }
     }
 
     #[pg_test]
@@ -214,11 +232,14 @@ mod tests {
         Spi::run("CREATE INDEX t_big_idx ON t_big USING tree_search_iam (tree)").unwrap();
         force_index();
         let q = "(repeat('{x', 500) || repeat('}', 500))::tree";
-        assert_eq!(ids(&format!("SELECT id FROM t_big WHERE tree <~ tree_query({q}, 0)")), vec![10]);
-        assert_eq!(
-            ids(&format!("SELECT id FROM t_big WHERE tree <~ tree_query({q}, 50)")),
-            vec![9, 10, 11]
-        );
+        for threads in THREADS {
+            scan_threads(threads);
+            assert_eq!(ids(&format!("SELECT id FROM t_big WHERE tree <~ tree_query({q}, 0)")), vec![10]);
+            assert_eq!(
+                ids(&format!("SELECT id FROM t_big WHERE tree <~ tree_query({q}, 50)")),
+                vec![9, 10, 11]
+            );
+        }
     }
 
     #[pg_test(
@@ -240,6 +261,17 @@ mod tests {
         Spi::run("REINDEX INDEX t_re_idx").unwrap();
         force_index();
         assert_eq!(ids("SELECT id FROM t_re WHERE tree <~ tree_query('{a}', 0)"), vec![0, 1000]);
+    }
+
+    /// `SET` on an unregistered name makes a string placeholder, so the thread
+    /// tests would silently run serially if registration broke.
+    #[pg_test]
+    fn scan_threads_is_registered() {
+        let row = Spi::get_one::<String>(
+            "SELECT vartype || ' ' || min_val FROM pg_settings WHERE name = 'tree_search_iam.scan_threads'",
+        )
+        .unwrap();
+        assert_eq!(row.as_deref(), Some("integer 1"));
     }
 
     #[pg_test(error = "invalid value for enum option \"lb\": nope")]

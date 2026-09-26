@@ -5,7 +5,7 @@ pgrx::pg_module_magic!();
 
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
-    iam::options::register();
+    iam::register();
 }
 
 mod iam;

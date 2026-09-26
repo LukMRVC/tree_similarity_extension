@@ -38,7 +38,7 @@ pub unsafe extern "C-unwind" fn ambulkdelete(
         };
         let meta = storage::read_meta(index);
         let callback = callback.expect("ambulkdelete without a callback");
-        let mut reader = StreamReader::new(PageSource::new(index, &meta));
+        let mut reader = StreamReader::new(PageSource::new(index, &meta, (*info).strategy));
         let mut any_dead = false;
         let mut tid = pg_sys::ItemPointerData::default();
         while let Some(raw) = reader.next_tid() {

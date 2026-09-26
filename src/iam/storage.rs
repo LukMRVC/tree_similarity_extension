@@ -139,41 +139,67 @@ impl<S: ChunkSource> StreamReader<S> {
         bytes
     }
 
-    /// Only the heap TIDs, skipping the tree payloads.
-    pub fn next_tid(&mut self) -> Option<u64> {
+    /// Buffer the whole next entry and return its byte length; `None` at the
+    /// end of the stream.
+    fn entry_len(&mut self) -> Option<usize> {
         if !self.fill(12) {
             return None;
         }
-        let tid = u64::from_le_bytes(self.take());
-        let n = u32::from_le_bytes(self.take()) as usize;
-        let body = n * 12;
-        if !self.fill(body) {
+        let n = u32::from_le_bytes(self.buf[self.pos + 8..self.pos + 12].try_into().unwrap()) as usize;
+        let len = 12 + n * 12;
+        if !self.fill(len) {
             panic!("tree_search_iam: truncated index entry");
         }
-        self.pos += body;
+        Some(len)
+    }
+
+    /// Only the heap TIDs, skipping the tree payloads.
+    pub fn next_tid(&mut self) -> Option<u64> {
+        let len = self.entry_len()?;
+        let tid = u64::from_le_bytes(self.take());
+        self.pos += len - 8;
         Some(tid)
     }
 
     pub fn next_entry(&mut self) -> Option<(u64, UnifiedTreeIndex)> {
-        if !self.fill(12) {
-            return None;
-        }
-        let tid = u64::from_le_bytes(self.take());
-        let n = u32::from_le_bytes(self.take()) as usize;
-        if !self.fill(n * 12) {
-            panic!("tree_search_iam: truncated index entry");
-        }
-        let labels = (0..n).map(|_| u64::from_le_bytes(self.take())).collect();
-        let sizes = (0..n).map(|_| i32::from_le_bytes(self.take())).collect();
-        Some((
-            tid,
-            UnifiedTreeIndex {
-                labels,
-                sizes,
-                tree_size: n,
-            },
-        ))
+        let len = self.entry_len()?;
+        let entry = decode_entry(&self.buf[self.pos..self.pos + len]);
+        self.pos += len;
+        Some(entry)
     }
+
+    /// Append the next entry's encoded bytes to `out`, undecoded.
+    pub fn next_raw_entry(&mut self, out: &mut Vec<u8>) -> bool {
+        let Some(len) = self.entry_len() else {
+            return false;
+        };
+        out.extend_from_slice(&self.buf[self.pos..self.pos + len]);
+        self.pos += len;
+        true
+    }
+}
+
+/// Decode one entry as written by `encode_entry`; `bytes` holds exactly that entry.
+pub fn decode_entry(bytes: &[u8]) -> (u64, UnifiedTreeIndex) {
+    let tid = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    let n = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let (labels, sizes) = bytes[12..].split_at(n * 8);
+    let labels = labels
+        .chunks_exact(8)
+        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    let sizes = sizes
+        .chunks_exact(4)
+        .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    (
+        tid,
+        UnifiedTreeIndex {
+            labels,
+            sizes,
+            tree_size: n,
+        },
+    )
 }
 
 // ============================================================================
@@ -259,37 +285,138 @@ impl ChunkSink for PageSink {
     }
 }
 
-/// Reads the data pages 1..=n_pages in order.
+/// Reads the data pages 1..=n_pages in order through a read stream, so
+/// Postgres fetches upcoming pages while the current ones are processed.
 pub struct PageSource {
-    index: pg_sys::Relation,
+    stream: *mut pg_sys::ReadStream,
+    /// Read by the stream's callback through a raw pointer; boxed so that
+    /// address stays fixed, and kept here so it lives as long as the stream.
+    blocks: Box<BlockRange>,
+    /// A ring this source allocated and must free; null when the caller owns it.
+    own_strategy: pg_sys::BufferAccessStrategy,
+}
+
+struct BlockRange {
     next: pg_sys::BlockNumber,
     last: pg_sys::BlockNumber,
 }
 
+/// True when an index of `n_data_pages` should be read through a ring, given
+/// `n_buffers` shared buffers.
+fn use_bulkread(n_data_pages: u32, n_buffers: i32) -> bool {
+    n_data_pages as i64 > n_buffers as i64 / 4
+}
+
+/// Read-stream callback: hands out blocks `next..=last`, then "no more".
+unsafe extern "C-unwind" fn next_block(
+    _stream: *mut pg_sys::ReadStream,
+    private: *mut std::ffi::c_void,
+    _per_buffer_data: *mut std::ffi::c_void,
+) -> pg_sys::BlockNumber {
+    let range = unsafe { &mut *(private as *mut BlockRange) };
+    if range.next > range.last {
+        return pg_sys::InvalidBlockNumber;
+    }
+    range.next += 1;
+    range.next - 1
+}
+
 impl PageSource {
-    pub fn new(index: pg_sys::Relation, meta: &MetaPage) -> Self {
-        Self {
-            index,
+    /// For index scans. An index larger than a quarter of shared buffers is
+    /// read through a small private ring of buffers (`BAS_BULKREAD`) so one
+    /// scan can't evict everything else; a smaller one goes through shared
+    /// buffers normally and stays cached. Postgres sizes seq scans the same way.
+    pub fn for_scan(index: pg_sys::Relation, meta: &MetaPage) -> Self {
+        if !use_bulkread(meta.n_data_pages, unsafe { pg_sys::NBuffers }) {
+            return Self::open(index, meta, std::ptr::null_mut(), false);
+        }
+        let ring = unsafe { pg_sys::GetAccessStrategy(pg_sys::BufferAccessStrategyType::BAS_BULKREAD) };
+        Self::open(index, meta, ring, true)
+    }
+
+    /// Read with the caller's buffer strategy (null = normal shared buffers),
+    /// e.g. the ring VACUUM passes in `IndexVacuumInfo`.
+    pub fn new(
+        index: pg_sys::Relation,
+        meta: &MetaPage,
+        strategy: pg_sys::BufferAccessStrategy,
+    ) -> Self {
+        Self::open(index, meta, strategy, false)
+    }
+
+    /// `owned`: this source frees `strategy` when done.
+    fn open(
+        index: pg_sys::Relation,
+        meta: &MetaPage,
+        strategy: pg_sys::BufferAccessStrategy,
+        owned: bool,
+    ) -> Self {
+        let mut blocks = Box::new(BlockRange {
             next: META_BLOCK + 1,
             last: META_BLOCK + meta.n_data_pages,
+        });
+        let stream = unsafe {
+            pg_sys::read_stream_begin_relation(
+                pg_sys::READ_STREAM_SEQUENTIAL as i32,
+                strategy,
+                index,
+                pg_sys::ForkNumber::MAIN_FORKNUM,
+                Some(next_block),
+                &mut *blocks as *mut BlockRange as *mut std::ffi::c_void,
+                0,
+            )
+        };
+        Self {
+            stream,
+            blocks,
+            own_strategy: if owned { strategy } else { std::ptr::null_mut() },
+        }
+    }
+
+    /// Release the stream (and our ring). Safe to call twice.
+    fn finish(&mut self) {
+        unsafe {
+            if !self.stream.is_null() {
+                pg_sys::read_stream_end(self.stream);
+                self.stream = std::ptr::null_mut();
+            }
+            if !self.own_strategy.is_null() {
+                pg_sys::FreeAccessStrategy(self.own_strategy);
+                self.own_strategy = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+/// On an ERROR, abort cleanup releases the pins and memory instead; calling
+/// into Postgres while unwinding from one is not safe.
+impl Drop for PageSource {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            self.finish();
         }
     }
 }
 
 impl ChunkSource for PageSource {
     fn next_chunk(&mut self) -> Option<Vec<u8>> {
-        if self.next > self.last {
+        if self.stream.is_null() {
             return None;
         }
         unsafe {
-            let buf = read_page(self.index, self.next, pg_sys::BUFFER_LOCK_SHARE);
+            let buf = pg_sys::read_stream_next_buffer(self.stream, std::ptr::null_mut());
+            if buf == pg_sys::InvalidBuffer as pg_sys::Buffer {
+                debug_assert!(self.blocks.next > self.blocks.last);
+                self.finish();
+                return None;
+            }
+            pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
             let src = contents(pg_sys::BufferGetPage(buf));
             let mut len = [0u8; 2];
             std::ptr::copy_nonoverlapping(src, len.as_mut_ptr(), 2);
             let len = u16::from_le_bytes(len) as usize;
             let chunk = std::slice::from_raw_parts(src.add(2), len.min(CHUNK_CAP)).to_vec();
             pg_sys::UnlockReleaseBuffer(buf);
-            self.next += 1;
             Some(chunk)
         }
     }
@@ -432,6 +559,35 @@ mod tests {
             assert_eq!(*tid, i as u64 * 7 + 3);
             assert_eq!(t, &trees[i]);
         }
+    }
+
+    #[test]
+    fn raw_entries_decode_like_next_entry() {
+        let trees: Vec<_> = (0..300).map(|i| uti(&chain(1 + (i * 37) % 900))).collect();
+        let mut w = StreamWriter::new(Vec::<Vec<u8>>::new());
+        for (i, t) in trees.iter().enumerate() {
+            w.push(i as u64, t);
+        }
+        let (chunks, _) = w.finish();
+        let mut r = StreamReader::new(chunks.into_iter());
+        let mut raw = Vec::new();
+        let mut i = 0;
+        while r.next_raw_entry(&mut raw) {
+            let (tid, t) = decode_entry(&raw);
+            assert_eq!((tid, &t), (i as u64, &trees[i]));
+            raw.clear();
+            i += 1;
+        }
+        assert_eq!(i, trees.len());
+    }
+
+    #[test]
+    fn bulkread_only_above_a_quarter_of_shared_buffers() {
+        // 16384 buffers = 128 MB of 8 KB pages.
+        assert!(!use_bulkread(0, 16384));
+        assert!(!use_bulkread(4096, 16384));
+        assert!(use_bulkread(4097, 16384));
+        assert!(use_bulkread(u32::MAX, 16384));
     }
 
     #[test]
