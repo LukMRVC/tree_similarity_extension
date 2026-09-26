@@ -15,6 +15,7 @@ pg_bench = ["dep:pgrx-bench"]
 
 
 [dependencies]
+libc = "0.2"
 memchr = "2.7.4"
 pgrx = "0.19.1"
 rustc-hash = "2.0.0"

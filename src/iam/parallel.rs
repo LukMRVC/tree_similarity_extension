@@ -1,87 +1,135 @@
-//! Multi-threaded entry filtering for one batch of raw index entries.
+//! Multi-threaded index scans: a per-backend pool of worker threads checks
+//! batches of raw entries while the backend reads the next ones.
 //!
-//! Pure Rust: nothing here may call into Postgres, since it runs on threads
-//! other than the backend's.
+//! Pure Rust: nothing here may call into Postgres, since the workers are not
+//! the backend's thread. The backend's side (`run_scan`) reaches Postgres only
+//! through the callbacks it is given.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use super::storage::{decode_entry, ChunkSource, StreamReader};
+use super::storage::{decode_entry_into, empty_tree, Batch, ChunkSource, StreamReader};
 use crate::pipelines::Lb;
 use crate::types::UnifiedTreeIndex;
 
-/// Entries a thread claims at a time; small enough to balance uneven trees.
-const SLICE: usize = 64;
-
-/// A batch of encoded entries: entry `i` is `buf[bounds[i]..bounds[i + 1]]`.
-pub struct Batch {
-    pub buf: Vec<u8>,
-    pub bounds: Vec<usize>,
-}
-
-impl Default for Batch {
-    fn default() -> Self {
-        Self {
-            buf: Vec::new(),
-            bounds: vec![0],
-        }
-    }
-}
-
-impl Batch {
-    pub fn len(&self) -> usize {
-        self.bounds.len() - 1
-    }
-
-    /// Replace the contents with the next entries from `reader`, stopping once
-    /// at least `max_bytes` are buffered. False when the stream is exhausted.
-    pub fn refill<S: ChunkSource>(&mut self, reader: &mut StreamReader<S>, max_bytes: usize) -> bool {
-        self.buf.clear();
-        self.bounds.truncate(1);
-        while self.buf.len() < max_bytes && reader.next_raw_entry(&mut self.buf) {
-            self.bounds.push(self.buf.len());
-        }
-        self.len() > 0
-    }
-}
+/// How long the backend waits for a result before calling `poll` again.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Whether `tree` is within `k` of every query.
 pub fn matches(queries: &[(UnifiedTreeIndex, i32)], lb: Lb, tree: &UnifiedTreeIndex) -> bool {
     queries.iter().all(|(q, k)| lb.within(q, tree, *k) <= *k)
 }
 
-/// TIDs of the entries in `batch` within every `(query, k)`, using `threads`
-/// threads (the caller's included). `Err` carries a worker's panic message.
-pub fn filter_batch(
+/// Append the TIDs of the entries in `batch` that match to `out`. `tree` is
+/// scratch space, reused across entries.
+fn filter_batch(
     batch: &Batch,
     queries: &[(UnifiedTreeIndex, i32)],
     lb: Lb,
-    threads: usize,
-) -> Result<Vec<u64>, String> {
-    let cursor = AtomicUsize::new(0);
-    let work = || {
-        let mut out = Vec::new();
-        loop {
-            let start = cursor.fetch_add(SLICE, Ordering::Relaxed);
-            if start >= batch.len() {
-                return out;
-            }
-            for i in start..(start + SLICE).min(batch.len()) {
-                let (tid, tree) = decode_entry(&batch.buf[batch.bounds[i]..batch.bounds[i + 1]]);
-                if matches(queries, lb, &tree) {
-                    out.push(tid);
-                }
-            }
+    tree: &mut UnifiedTreeIndex,
+    out: &mut Vec<u64>,
+) {
+    for i in 0..batch.len() {
+        let tid = decode_entry_into(batch.entry(i), tree);
+        if matches(queries, lb, tree) {
+            out.push(tid);
         }
-    };
+    }
+}
 
-    std::thread::scope(|s| {
-        let workers: Vec<_> = (1..threads).map(|_| s.spawn(work)).collect();
-        let mut tids = work();
-        for w in workers {
-            tids.extend(w.join().map_err(panic_message)?);
+/// What every batch of one scan is checked against.
+struct Scan {
+    queries: Vec<(UnifiedTreeIndex, i32)>,
+    lb: Lb,
+    /// Set when the scan ends early (e.g. on an ERROR): its queued batches
+    /// are then skipped.
+    cancelled: AtomicBool,
+}
+
+struct Job {
+    scan: Arc<Scan>,
+    batch: Batch,
+    done: Sender<Done>,
+}
+
+/// A checked batch, handed back so its buffer can be reused.
+struct Done {
+    batch: Batch,
+    tids: Result<Vec<u64>, String>,
+}
+
+/// Worker threads, started on the first threaded scan and kept for the rest
+/// of the backend's life. Dropping `jobs` lets the workers exit.
+struct Pool {
+    jobs: Sender<Job>,
+    size: usize,
+}
+
+static POOL: Mutex<Option<Pool>> = Mutex::new(None);
+
+/// The job queue of a pool with exactly `threads` workers, (re)starting it
+/// when the size changed.
+fn pool_jobs(threads: usize) -> Sender<Job> {
+    let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+    if pool.as_ref().map(|p| p.size) != Some(threads) {
+        *pool = Some(Pool::start(threads));
+    }
+    pool.as_ref().unwrap().jobs.clone()
+}
+
+impl Pool {
+    fn start(size: usize) -> Self {
+        let (jobs, queue) = mpsc::channel::<Job>();
+        let queue = Arc::new(Mutex::new(queue));
+        // Postgres handles its signals (cancel, termination, latches) on the
+        // backend's thread; the kernel may deliver a process signal to any
+        // thread that doesn't block it. Workers inherit this mask.
+        with_signals_blocked(|| {
+            for i in 0..size {
+                let queue = Arc::clone(&queue);
+                std::thread::Builder::new()
+                    .name(format!("tree_search_iam worker {i}"))
+                    .spawn(move || work(&queue))
+                    .expect("tree_search_iam: could not start a scan thread");
+            }
+        });
+        Self { jobs, size }
+    }
+}
+
+fn with_signals_blocked(f: impl FnOnce()) {
+    unsafe {
+        let mut all: libc::sigset_t = std::mem::zeroed();
+        let mut old: libc::sigset_t = std::mem::zeroed();
+        libc::sigfillset(&mut all);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &all, &mut old);
+        f();
+        libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+    }
+}
+
+/// A worker: check batches until the pool is dropped.
+fn work(queue: &Mutex<Receiver<Job>>) {
+    let mut tree = empty_tree();
+    loop {
+        let job = queue.lock().unwrap_or_else(|e| e.into_inner()).recv();
+        let Ok(Job { scan, batch, done }) = job else {
+            return;
+        };
+        if scan.cancelled.load(Ordering::Relaxed) {
+            continue;
         }
-        Ok(tids)
-    })
+        let tids = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut out = Vec::new();
+            filter_batch(&batch, &scan.queries, scan.lb, &mut tree, &mut out);
+            out
+        }))
+        .map_err(panic_message);
+        // The scan may be gone already; its result is then not needed.
+        let _ = done.send(Done { batch, tids });
+    }
 }
 
 fn panic_message(e: Box<dyn std::any::Any + Send>) -> String {
@@ -91,10 +139,78 @@ fn panic_message(e: Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "unknown panic".into())
 }
 
+/// Marks a scan cancelled when the backend leaves `run_scan`, however it leaves.
+struct CancelOnDrop(Arc<Scan>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Check every entry of `reader` on `threads` pool workers. The calling
+/// (backend) thread reads batches of about `batch_bytes` and keeps up to two
+/// per worker queued, so reading overlaps with checking. Matching TIDs go to
+/// `on_tids`, in no particular order; `poll` runs after every batch read and
+/// at least every `POLL_INTERVAL` while waiting (for interrupt checks).
+/// Either callback may unwind; the scan's queued batches are then dropped.
+/// `Err` carries a worker's panic message.
+pub fn run_scan<S: ChunkSource>(
+    reader: &mut StreamReader<S>,
+    queries: Vec<(UnifiedTreeIndex, i32)>,
+    lb: Lb,
+    threads: usize,
+    batch_bytes: usize,
+    mut on_tids: impl FnMut(&[u64]),
+    mut poll: impl FnMut(),
+) -> Result<(), String> {
+    let scan = Arc::new(Scan {
+        queries,
+        lb,
+        cancelled: AtomicBool::new(false),
+    });
+    let _cancel = CancelOnDrop(Arc::clone(&scan));
+    let jobs = pool_jobs(threads);
+    let (done_tx, done_rx) = mpsc::channel();
+    let max_in_flight = 2 * threads;
+    let mut spare: Vec<Batch> = Vec::new();
+    let mut in_flight = 0;
+    let mut exhausted = false;
+    loop {
+        while !exhausted && in_flight < max_in_flight {
+            let mut batch = spare.pop().unwrap_or_default();
+            if !reader.next_batch(batch_bytes, &mut batch) {
+                exhausted = true;
+                break;
+            }
+            let job = Job {
+                scan: Arc::clone(&scan),
+                batch,
+                done: done_tx.clone(),
+            };
+            jobs.send(job).expect("tree_search_iam: scan threads are gone");
+            in_flight += 1;
+            poll();
+        }
+        if in_flight == 0 {
+            return Ok(());
+        }
+        match done_rx.recv_timeout(POLL_INTERVAL) {
+            Ok(done) => {
+                in_flight -= 1;
+                on_tids(&done.tids?);
+                spare.push(done.batch);
+            }
+            Err(RecvTimeoutError::Timeout) => poll(),
+            Err(RecvTimeoutError::Disconnected) => unreachable!("done_tx is still held"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iam::storage::StreamWriter;
+    use crate::iam::storage::tests::reader;
     use std::ffi::CString;
 
     fn uti(s: &str) -> UnifiedTreeIndex {
@@ -112,51 +228,34 @@ mod tests {
         }
     }
 
-    fn reader(trees: &[UnifiedTreeIndex]) -> StreamReader<std::vec::IntoIter<Vec<u8>>> {
-        let mut w = StreamWriter::new(Vec::<Vec<u8>>::new());
-        for (i, t) in trees.iter().enumerate() {
-            w.push(i as u64, t);
-        }
-        StreamReader::new(w.finish().0.into_iter())
-    }
-
-    /// Small batches split the stream at entry boundaries without losing any.
-    #[test]
-    fn refill_covers_every_entry_once() {
-        let trees: Vec<_> = (0..400).map(|i| uti(&tree(i))).collect();
-        for max_bytes in [1, 100, 5000, usize::MAX] {
-            let mut r = reader(&trees);
-            let mut batch = Batch::default();
-            let mut tids = Vec::new();
-            let mut n_batches = 0;
-            while batch.refill(&mut r, max_bytes) {
-                n_batches += 1;
-                for i in 0..batch.len() {
-                    tids.push(decode_entry(&batch.buf[batch.bounds[i]..batch.bounds[i + 1]]).0);
-                }
-            }
-            assert_eq!(tids, (0..400).collect::<Vec<u64>>(), "max_bytes={max_bytes}");
-            assert!(max_bytes != 1 || n_batches == 400);
-            assert!(max_bytes != usize::MAX || n_batches == 1);
-        }
+    fn scan(
+        trees: &[UnifiedTreeIndex],
+        queries: &[(UnifiedTreeIndex, i32)],
+        lb: Lb,
+        threads: usize,
+        batch_bytes: usize,
+    ) -> Vec<u64> {
+        let mut got = Vec::new();
+        let on_tids = |t: &[u64]| got.extend_from_slice(t);
+        run_scan(&mut reader(trees), queries.to_vec(), lb, threads, batch_bytes, on_tids, || {}).unwrap();
+        got.sort_unstable();
+        got
     }
 
     #[test]
-    fn threads_match_serial_for_every_lb() {
+    fn pool_matches_serial_for_every_lb() {
         let trees: Vec<_> = (0..400).map(|i| uti(&tree(i))).collect();
-        let mut batch = Batch::default();
-        assert!(batch.refill(&mut reader(&trees), usize::MAX));
         for lb in Lb::ALL {
             for (qi, k) in [(2, 1), (7, 2), (13, 0), (3, 3)] {
                 let queries = [(trees[qi].clone(), k)];
                 let want: Vec<u64> = (0..trees.len())
-                    .filter(|&i| lb.within(&queries[0].0, &trees[i], k) <= k)
+                    .filter(|&i| matches(&queries, lb, &trees[i]))
                     .map(|i| i as u64)
                     .collect();
                 assert!(!want.is_empty() && want.len() < trees.len());
-                for threads in [1, 3, 8] {
-                    let mut got = filter_batch(&batch, &queries, lb, threads).unwrap();
-                    got.sort_unstable();
+                // Changing sizes also restarts the pool between scans.
+                for (threads, batch_bytes) in [(1, 1), (3, 100), (8, 1000), (3, usize::MAX)] {
+                    let got = scan(&trees, &queries, lb, threads, batch_bytes);
                     assert_eq!(got, want, "lb={} q={qi} k={k} threads={threads}", lb.name());
                 }
             }
@@ -164,8 +263,29 @@ mod tests {
     }
 
     #[test]
-    fn empty_batch() {
-        let batch = Batch::default();
-        assert!(filter_batch(&batch, &[(uti("{a}"), 1)], Lb::SedStruct, 4).unwrap().is_empty());
+    fn empty_scan() {
+        assert!(scan(&[], &[(uti("{a}"), 1)], Lb::SedStruct, 4, 100).is_empty());
+    }
+
+    /// A scan abandoned by an unwinding callback (an ERROR in the backend)
+    /// leaves the pool usable, and its leftover results don't leak into the
+    /// next scan.
+    #[test]
+    fn abandoned_scan_leaves_pool_usable() {
+        let trees: Vec<_> = (0..400).map(|i| uti(&tree(i))).collect();
+        let queries = [(trees[7].clone(), 2)];
+        let want = scan(&trees, &queries, Lb::SedStruct, 4, 100);
+        let mut polls = 0;
+        let abandoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let poll = || {
+                polls += 1;
+                if polls == 5 {
+                    panic!("canceled");
+                }
+            };
+            run_scan(&mut reader(&trees), queries.to_vec(), Lb::SedStruct, 4, 100, |_| {}, poll)
+        }));
+        assert!(abandoned.is_err());
+        assert_eq!(scan(&trees, &queries, Lb::SedStruct, 4, 100), want);
     }
 }

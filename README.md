@@ -29,7 +29,7 @@ fetch the right `rustc` automatically.
 
 ```sh
 # One-time setup: install the pgrx CLI (version-matched to the pinned pgrx dep) ...
-cargo install --locked cargo-pgrx --version 0.18.0
+cargo install --locked cargo-pgrx --version 0.19.1
 # ... and download/build the supported Postgres versions into ~/.pgrx/.
 cargo pgrx init
 
@@ -94,3 +94,56 @@ The Rust `ted_k` port in `src/lb/ted/topdiff.rs` is a faithful translation of tr
 [CBOR](https://cbor.io/) and re-parses the tree. The `tree_search_iam` index avoids this: trees are parsed once
 at build time and stored as hashed labels + subtree sizes. The index is build-once (no WAL, goes stale on any
 write until `REINDEX`) — see [docs/usage.md](docs/usage.md#limitations).
+
+### I/O configuration and io_uring
+
+Index scans read pages through a Postgres read stream, which prefetches ahead of the scan. How those reads are
+executed is Postgres's `io_method` (PG18). These settings affect scan speed:
+
+| Setting                        | Default        | Effect                                                                                                                    |
+|--------------------------------|----------------|---------------------------------------------------------------------------------------------------------------------------|
+| `io_method`                    | `worker`       | `worker` (I/O worker processes), `sync` (backend reads itself), `io_uring` (Linux, needs a `--with-liburing` build). Restart. |
+| `io_workers`                   | `3`            | I/O worker processes; `worker` only.                                                                                      |
+| `effective_io_concurrency`     | `16`           | How many reads a stream keeps in flight.                                                                                  |
+| `io_combine_limit`             | `128kB`        | Adjacent pages merged into one read (capped by `io_max_combine_limit`, restart).                                          |
+| `shared_buffers`               | `128MB`        | An index larger than 1/4 of it is read through a small private ring: it evicts nothing else, but every scan re-reads it. |
+| `tree_search_iam.scan_threads` | `1`            | Threads checking entries per scan (per session).                                                                          |
+
+On WSL2, with the index not in shared buffers, `worker` was ~2× slower than `sync` for index scans (rna, 20
+queries: ~590 ms vs ~200 ms), and Postgres's own seq scan was ~5× slower. `io_uring` is untested so far.
+
+#### Benchmarking on an io_uring system
+
+`cargo pgrx init` always builds an assertion-enabled Postgres (`--enable-cassert`, `USE_ASSERT_CHECKING`,
+`RANDOMIZE_ALLOCATED_MEMORY`), which is fine for tests but skews timings, and it has no liburing support. For
+performance numbers, use a release Postgres 18 built with liburing:
+
+```sh
+# 1. The kernel must allow io_uring (0 = allowed). Container seccomp profiles may block it.
+cat /proc/sys/kernel/io_uring_disabled
+# 2. liburing headers, plus Postgres's usual build dependencies.
+sudo apt install liburing-dev            # Fedora: sudo dnf install liburing-devel
+# 3. Build Postgres 18 from source (meson: -Dliburing=enabled).
+./configure --prefix=$HOME/pg18-uring --with-liburing && make -j"$(nproc)" && make install
+$HOME/pg18-uring/bin/pg_config --configure | grep -o -- --with-liburing   # packaged builds: check the same way
+# 4. Cluster with io_uring, on its own port.
+$HOME/pg18-uring/bin/initdb -D $HOME/pg18-uring/data
+echo "io_method = io_uring" >> $HOME/pg18-uring/data/postgresql.conf
+$HOME/pg18-uring/bin/pg_ctl -D $HOME/pg18-uring/data -o "-p 5418" -l $HOME/pg18-uring/log start
+$HOME/pg18-uring/bin/psql -p 5418 -d postgres -c "SHOW io_method"                 # io_uring
+# 5. Point pgrx at it and run the benchmark into a separate results directory.
+cargo pgrx init --pg18 $HOME/pg18-uring/bin/pg_config
+PG_CONFIG=$HOME/pg18-uring/bin/pg_config PGPORT=5418 OUT_DIR=bench/results/io_uring ./bench/run_bench.sh
+```
+
+To compare methods on the same server, switch and restart between runs, each into its own `OUT_DIR`:
+`results.csv` is resumable by (dataset, method, query), so a shared file would skip every query as already done.
+
+```sh
+psql -p 5418 -d postgres -c "ALTER SYSTEM SET io_method = 'worker'"   # or 'sync'; RESET for the default
+pg_ctl -D $HOME/pg18-uring/data restart
+PG_CONFIG=... PGPORT=5418 OUT_DIR=bench/results/worker ./bench/run_bench.sh --skip-build
+```
+
+I/O only matters when the index is not already in shared buffers: use an index larger than `shared_buffers`
+(treefam's is 153 MB) or lower `shared_buffers`.

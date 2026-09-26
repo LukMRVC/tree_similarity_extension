@@ -1,7 +1,7 @@
 //! Bitmap-only scans: every entry is checked against every scan key.
 //!
 //! With `tree_search_iam.scan_threads > 1` the backend reads raw entries in
-//! batches and `parallel::filter_batch` checks each batch on that many threads.
+//! batches and that many pool threads check them (`parallel::run_scan`).
 
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 use pgrx::itemptr::u64_to_item_pointer;
@@ -10,14 +10,14 @@ use pgrx::prelude::*;
 
 use super::build::rel_name;
 use super::options::index_lb;
-use super::parallel::{self, Batch};
+use super::parallel;
 use super::storage::{self, PageSource, StreamReader};
 use crate::types::{TreeQuery, UnifiedTreeIndex};
 
 static SCAN_THREADS: GucSetting<i32> = GucSetting::<i32>::new(1);
 
-/// Encoded bytes per batch; also bounds interrupt latency.
-const BATCH_BYTES: usize = 1 << 20;
+/// Encoded bytes per batch handed to a scan thread.
+const BATCH_BYTES: usize = 64 << 10;
 
 /// Register `tree_search_iam.scan_threads`. Runs once per backend, from `_PG_init`.
 pub fn register_guc() {
@@ -90,33 +90,28 @@ pub unsafe extern "C-unwind" fn amgetbitmap(
         let threads = SCAN_THREADS.get().max(1) as usize;
         let mut reader = StreamReader::new(PageSource::for_scan(index, &meta));
         let mut tid = pg_sys::ItemPointerData::default();
-        let mut add = |raw_tid: u64| {
-            u64_to_item_pointer(raw_tid, &mut tid);
-            pg_sys::tbm_add_tuples(tbm, &mut tid, 1, false);
-        };
         let mut n_matches = 0i64;
+        let mut add = |raw_tids: &[u64]| {
+            for raw_tid in raw_tids {
+                u64_to_item_pointer(*raw_tid, &mut tid);
+                pg_sys::tbm_add_tuples(tbm, &mut tid, 1, false);
+            }
+            n_matches += raw_tids.len() as i64;
+        };
 
-        // One thread: decode straight from the reader, skipping the batch copy.
         if threads == 1 {
-            while let Some((raw_tid, tree)) = reader.next_entry() {
+            let mut tree = storage::empty_tree();
+            while let Some(raw_tid) = reader.next_entry_into(&mut tree) {
                 pg_sys::check_for_interrupts!();
                 if parallel::matches(&queries, lb, &tree) {
-                    add(raw_tid);
-                    n_matches += 1;
+                    add(&[raw_tid]);
                 }
             }
-            return n_matches;
-        }
-
-        // Only this (backend) thread touches Postgres; worker threads exist
-        // only inside `filter_batch`, so an ERROR here never leaves one running.
-        let mut batch = Batch::default();
-        while batch.refill(&mut reader, BATCH_BYTES) {
-            pg_sys::check_for_interrupts!();
-            let tids = parallel::filter_batch(&batch, &queries, lb, threads)
-                .unwrap_or_else(|e| error!("tree_search_iam: scan thread failed: {e}"));
-            tids.iter().for_each(|t| add(*t));
-            n_matches += tids.len() as i64;
+        } else {
+            parallel::run_scan(&mut reader, queries, lb, threads, BATCH_BYTES, add, || {
+                pg_sys::check_for_interrupts!()
+            })
+            .unwrap_or_else(|e| error!("tree_search_iam: scan thread failed: {e}"));
         }
         n_matches
     }

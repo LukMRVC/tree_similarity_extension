@@ -77,7 +77,11 @@ A scan can check entries on several threads inside the backend. Results are iden
 SET tree_search_iam.scan_threads = 8;   -- 1 .. min(CPU count, 64)
 ```
 
-This works for any plan that uses the index, including joins (one scan per outer row). It is separate from Postgres parallel query: each backend, including a parallel worker, uses up to this many threads per scan.
+With `N > 1`, the backend reads the index and `N` worker threads check the entries while it reads ahead. The workers start with the first such scan and stay for the rest of the session, so later scans pay no startup cost.
+
+The speedup depends on how much work each entry needs. With cheap checks the scan is limited by reading (rna: ~1.4× at 4–8 threads). With expensive ones it scales with threads (ptb: ~6× at 16). More threads than free CPU cores only slow the reading down.
+
+This works for any plan that uses the index, including joins (one scan per outer row). It is separate from Postgres parallel query: each backend, including a parallel worker, keeps its own `N` threads.
 
 ### Limitations
 

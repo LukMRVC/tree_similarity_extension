@@ -65,9 +65,10 @@ pub trait ChunkSink {
     fn write_chunk(&mut self, chunk: &[u8]);
 }
 
-/// Where chunks come from, in order. `None` once the stream is exhausted.
+/// Where chunks come from, in order.
 pub trait ChunkSource {
-    fn next_chunk(&mut self) -> Option<Vec<u8>>;
+    /// Append the next chunk to `out`; false once the stream is exhausted.
+    fn read_chunk(&mut self, out: &mut Vec<u8>) -> bool;
 }
 
 /// Buffers encoded entries and hands them to the sink in `CHUNK_CAP` pieces.
@@ -107,8 +108,37 @@ impl<S: ChunkSink> StreamWriter<S> {
 /// Decodes entries from a chunk source, pulling chunks as needed.
 pub struct StreamReader<S: ChunkSource> {
     source: S,
+    /// Buffered stream bytes; `buf[pos..]` is unread.
     buf: Vec<u8>,
     pos: usize,
+    /// Bytes before `start` are no longer needed and may be dropped to make
+    /// room. Normally `start == pos`; `next_batch` holds it at the batch start.
+    start: usize,
+}
+
+/// Whole encoded entries: entry `i` is `buf[bounds[i]..bounds[i + 1]]`.
+pub struct Batch {
+    pub buf: Vec<u8>,
+    pub bounds: Vec<usize>,
+}
+
+impl Default for Batch {
+    fn default() -> Self {
+        Self {
+            buf: Vec::new(),
+            bounds: vec![0],
+        }
+    }
+}
+
+impl Batch {
+    pub fn len(&self) -> usize {
+        self.bounds.len() - 1
+    }
+
+    pub fn entry(&self, i: usize) -> &[u8] {
+        &self.buf[self.bounds[i]..self.bounds[i + 1]]
+    }
 }
 
 impl<S: ChunkSource> StreamReader<S> {
@@ -117,26 +147,21 @@ impl<S: ChunkSource> StreamReader<S> {
             source,
             buf: Vec::new(),
             pos: 0,
+            start: 0,
         }
     }
 
     /// Make sure `n` unread bytes are buffered; false if the stream ends first.
     fn fill(&mut self, n: usize) -> bool {
         while self.buf.len() - self.pos < n {
-            let Some(chunk) = self.source.next_chunk() else {
+            self.buf.drain(..self.start);
+            self.pos -= self.start;
+            self.start = 0;
+            if !self.source.read_chunk(&mut self.buf) {
                 return false;
-            };
-            self.buf.drain(..self.pos);
-            self.pos = 0;
-            self.buf.extend_from_slice(&chunk);
+            }
         }
         true
-    }
-
-    fn take<const N: usize>(&mut self) -> [u8; N] {
-        let bytes = self.buf[self.pos..self.pos + N].try_into().unwrap();
-        self.pos += N;
-        bytes
     }
 
     /// Buffer the whole next entry and return its byte length; `None` at the
@@ -155,51 +180,69 @@ impl<S: ChunkSource> StreamReader<S> {
 
     /// Only the heap TIDs, skipping the tree payloads.
     pub fn next_tid(&mut self) -> Option<u64> {
+        self.start = self.pos;
         let len = self.entry_len()?;
-        let tid = u64::from_le_bytes(self.take());
-        self.pos += len - 8;
+        let tid = u64::from_le_bytes(self.buf[self.pos..self.pos + 8].try_into().unwrap());
+        self.pos += len;
         Some(tid)
     }
 
-    pub fn next_entry(&mut self) -> Option<(u64, UnifiedTreeIndex)> {
+    /// Decode the next entry into `tree`, reusing its allocations.
+    pub fn next_entry_into(&mut self, tree: &mut UnifiedTreeIndex) -> Option<u64> {
+        self.start = self.pos;
         let len = self.entry_len()?;
-        let entry = decode_entry(&self.buf[self.pos..self.pos + len]);
+        let tid = decode_entry_into(&self.buf[self.pos..self.pos + len], tree);
         self.pos += len;
-        Some(entry)
+        Some(tid)
     }
 
-    /// Append the next entry's encoded bytes to `out`, undecoded.
-    pub fn next_raw_entry(&mut self, out: &mut Vec<u8>) -> bool {
-        let Some(len) = self.entry_len() else {
+    /// Move the next whole entries, at least `max_bytes` of them unless the
+    /// stream ends first, into `batch`. Its old buffer is reused, and the
+    /// entries are handed over by swapping buffers, not copied. False when no
+    /// entries are left.
+    pub fn next_batch(&mut self, max_bytes: usize, batch: &mut Batch) -> bool {
+        self.start = self.pos;
+        // Bounds are kept relative to `start`, which `fill` may move.
+        batch.bounds.truncate(1);
+        while self.pos - self.start < max_bytes {
+            let Some(len) = self.entry_len() else { break };
+            self.pos += len;
+            batch.bounds.push(self.pos - self.start);
+        }
+        if batch.len() == 0 {
             return false;
-        };
-        out.extend_from_slice(&self.buf[self.pos..self.pos + len]);
-        self.pos += len;
+        }
+        batch.buf.clear();
+        batch.buf.extend_from_slice(&self.buf[self.pos..]);
+        std::mem::swap(&mut self.buf, &mut batch.buf);
+        batch.bounds.iter_mut().for_each(|b| *b += self.start);
+        self.pos = 0;
+        self.start = 0;
         true
     }
 }
 
-/// Decode one entry as written by `encode_entry`; `bytes` holds exactly that entry.
-pub fn decode_entry(bytes: &[u8]) -> (u64, UnifiedTreeIndex) {
+/// Decode one entry as written by `encode_entry` into `tree`, reusing its
+/// allocations, and return its TID. `bytes` holds exactly that entry.
+pub fn decode_entry_into(bytes: &[u8], tree: &mut UnifiedTreeIndex) -> u64 {
     let tid = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
     let n = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let (labels, sizes) = bytes[12..].split_at(n * 8);
-    let labels = labels
-        .chunks_exact(8)
-        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
-        .collect();
-    let sizes = sizes
-        .chunks_exact(4)
-        .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
-        .collect();
-    (
-        tid,
-        UnifiedTreeIndex {
-            labels,
-            sizes,
-            tree_size: n,
-        },
-    )
+    tree.labels.clear();
+    tree.labels.extend(labels.chunks_exact(8).map(|b| u64::from_le_bytes(b.try_into().unwrap())));
+    tree.sizes.clear();
+    tree.sizes.extend(sizes.chunks_exact(4).map(|b| i32::from_le_bytes(b.try_into().unwrap())));
+    tree.tree_size = n;
+    tid
+}
+
+/// A tree to decode into.
+pub fn empty_tree() -> UnifiedTreeIndex {
+    UnifiedTreeIndex {
+        labels: Vec::new(),
+        sizes: Vec::new(),
+        tree_size: 0,
+    }
 }
 
 // ============================================================================
@@ -399,25 +442,25 @@ impl Drop for PageSource {
 }
 
 impl ChunkSource for PageSource {
-    fn next_chunk(&mut self) -> Option<Vec<u8>> {
+    fn read_chunk(&mut self, out: &mut Vec<u8>) -> bool {
         if self.stream.is_null() {
-            return None;
+            return false;
         }
         unsafe {
             let buf = pg_sys::read_stream_next_buffer(self.stream, std::ptr::null_mut());
             if buf == pg_sys::InvalidBuffer as pg_sys::Buffer {
                 debug_assert!(self.blocks.next > self.blocks.last);
                 self.finish();
-                return None;
+                return false;
             }
             pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
             let src = contents(pg_sys::BufferGetPage(buf));
             let mut len = [0u8; 2];
             std::ptr::copy_nonoverlapping(src, len.as_mut_ptr(), 2);
             let len = u16::from_le_bytes(len) as usize;
-            let chunk = std::slice::from_raw_parts(src.add(2), len.min(CHUNK_CAP)).to_vec();
+            out.extend_from_slice(std::slice::from_raw_parts(src.add(2), len.min(CHUNK_CAP)));
             pg_sys::UnlockReleaseBuffer(buf);
-            Some(chunk)
+            true
         }
     }
 }
@@ -479,7 +522,7 @@ pub unsafe fn mark_stale(index: pg_sys::Relation) {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use std::ffi::CString;
 
@@ -491,9 +534,18 @@ mod tests {
     }
 
     impl ChunkSource for std::vec::IntoIter<Vec<u8>> {
-        fn next_chunk(&mut self) -> Option<Vec<u8>> {
-            self.next()
+        fn read_chunk(&mut self, out: &mut Vec<u8>) -> bool {
+            self.next().map(|c| out.extend_from_slice(&c)).is_some()
         }
+    }
+
+    /// The trees as a reader over their encoded stream, TID `i` for tree `i`.
+    pub fn reader(trees: &[UnifiedTreeIndex]) -> StreamReader<std::vec::IntoIter<Vec<u8>>> {
+        let mut w = StreamWriter::new(Vec::<Vec<u8>>::new());
+        for (i, t) in trees.iter().enumerate() {
+            w.push(i as u64, t);
+        }
+        StreamReader::new(w.finish().0.into_iter())
     }
 
     fn uti(s: &str) -> UnifiedTreeIndex {
@@ -517,8 +569,9 @@ mod tests {
         let n_chunks = chunks.len();
         let mut r = StreamReader::new(chunks.into_iter());
         let mut out = Vec::new();
-        while let Some(e) = r.next_entry() {
-            out.push(e);
+        let mut t = empty_tree();
+        while let Some(tid) = r.next_entry_into(&mut t) {
+            out.push((tid, t.clone()));
         }
         (n_chunks, out)
     }
@@ -561,24 +614,32 @@ mod tests {
         }
     }
 
+    /// Batches split the stream at entry boundaries, lose nothing, and hold
+    /// at least `max_bytes` each (except the last), also for huge entries.
     #[test]
-    fn raw_entries_decode_like_next_entry() {
+    fn batches_cover_every_entry_once() {
         let trees: Vec<_> = (0..300).map(|i| uti(&chain(1 + (i * 37) % 900))).collect();
-        let mut w = StreamWriter::new(Vec::<Vec<u8>>::new());
-        for (i, t) in trees.iter().enumerate() {
-            w.push(i as u64, t);
+        for max_bytes in [1, 100, 5000, 100_000, usize::MAX] {
+            let mut r = reader(&trees);
+            let mut batch = Batch::default();
+            let mut n_batches = 0;
+            let mut i = 0;
+            let mut t = empty_tree();
+            let mut short_batches = 0;
+            while r.next_batch(max_bytes, &mut batch) {
+                n_batches += 1;
+                short_batches += usize::from(batch.bounds[batch.len()] - batch.bounds[0] < max_bytes);
+                for j in 0..batch.len() {
+                    assert_eq!(decode_entry_into(batch.entry(j), &mut t), i as u64);
+                    assert_eq!(t, trees[i], "max_bytes={max_bytes} entry {i}");
+                    i += 1;
+                }
+            }
+            assert_eq!(i, trees.len(), "max_bytes={max_bytes}");
+            assert!(short_batches <= 1, "only the last batch may be short");
+            assert!(max_bytes != 1 || n_batches == trees.len());
+            assert!(max_bytes != usize::MAX || n_batches == 1);
         }
-        let (chunks, _) = w.finish();
-        let mut r = StreamReader::new(chunks.into_iter());
-        let mut raw = Vec::new();
-        let mut i = 0;
-        while r.next_raw_entry(&mut raw) {
-            let (tid, t) = decode_entry(&raw);
-            assert_eq!((tid, &t), (i as u64, &trees[i]));
-            raw.clear();
-            i += 1;
-        }
-        assert_eq!(i, trees.len());
     }
 
     #[test]
