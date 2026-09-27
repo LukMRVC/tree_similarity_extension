@@ -83,6 +83,16 @@ The speedup depends on how much work each entry needs. With cheap checks the sca
 
 This works for any plan that uses the index, including joins (one scan per outer row). It is separate from Postgres parallel query: each backend, including a parallel worker, keeps its own `N` threads.
 
+### I/O method
+
+For performance, use `io_method = worker` (the PG18 default). It is a server setting, so the extension cannot pick it per scan; changing it needs a restart:
+
+```sql
+ALTER SYSTEM SET io_method = 'worker';   -- then restart the server
+```
+
+It matters when the index is larger than a quarter of `shared_buffers`, so every scan re-reads it (see [Limitations](#limitations)). With `worker`, the I/O worker processes copy pages from the OS page cache on other cores while the backend checks entries. With `sync` and `io_uring`, a read that hits the page cache is copied by the backend itself. On python (523 MB index, `shared_buffers = 128MB`, warm page cache, 1 thread), a scan took ~135 ms with `worker` against ~197 ms with `io_uring` and ~199 ms with `sync`. `io_workers` above the default `3` gained nothing; `1` gave ~174 ms. An index that fits in shared buffers is not affected.
+
 ### Limitations
 
 - **Build-once.** Any `INSERT`/`UPDATE`, or a `VACUUM` that removes rows, marks the index stale. Scans then fail until rebuilt:

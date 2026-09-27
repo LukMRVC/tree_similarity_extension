@@ -7,3 +7,4 @@
 
 # Git worktrees
 /.worktrees/
+/datasets/
