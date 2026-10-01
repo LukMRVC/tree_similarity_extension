@@ -22,6 +22,92 @@ SELECT '{a{b\{c}}'::tree;                 -- label "b\{c"
 SELECT 'x'::tree;                         -- ERROR: invalid tree "x": ...
 ```
 
+## Building trees from data
+
+Hierarchies stored as rows (adjacency lists and the like), JSON or XML can be turned into `tree` values.
+
+All builders write labels the same way: a `\` goes before every `{` and `}` in a label, and stays part of the label (`a{b` becomes `a\{b`). A label ending in `\` would escape the brace after it, so it gets a trailing space; this is the one case where two different labels (`x\` and `x\ `) become equal.
+
+### Adjacency lists: `tree_agg`
+
+```sql
+CREATE TABLE nodes (id int PRIMARY KEY, parent_id int REFERENCES nodes, label text, pos int);
+INSERT INTO nodes VALUES (1, NULL, 'html', 1), (2, 1, 'head', 1), (3, 1, 'body', 2), (4, 3, 'p', 1);
+
+SELECT tree_agg(id, parent_id, label ORDER BY pos) FROM nodes;   -- {html{head}{body{p}}}
+```
+
+`tree_agg(id, parent_id, label)` builds one tree from the rows of each group. Ids are `bigint` or `text`; cast other key types, e.g. `uuid`, with `::text`.
+
+- **Root**: the one row whose `parent_id` is NULL or not the id of another row in the group. So a `WHERE` that keeps only the rows of a subtree gives that subtree.
+- **Sibling order**: the order in which rows reach the aggregate, so give it an `ORDER BY`. Without one the order is unspecified, and TED depends on it.
+- **Several trees**: one per group, e.g. `SELECT doc_id, tree_agg(...) FROM nodes GROUP BY doc_id`.
+- **Errors**: no root or more than one root, a duplicate id, rows not connected to the root (their parent links form a cycle), a NULL id or label. No rows give NULL.
+
+Other encodings of a hierarchy reduce to an adjacency list first:
+
+| Encoding | `parent_id` of a row |
+|----------|----------------------|
+| Closure table `(ancestor, descendant, depth)` | `ancestor` of its row with `depth = 1` |
+| Materialized path (`'1.4.2'`, or `ltree`) | its path without the last segment (`subpath(path, 0, -1)` for `ltree`) |
+| Nested sets `(lft, rgt)` | the enclosing row with the largest `lft`: `(SELECT p.id FROM t p WHERE p.lft < c.lft AND p.rgt > c.rgt ORDER BY p.lft DESC LIMIT 1)`; order siblings by `lft` |
+
+#### Without the extension: a recursive query
+
+The same trees in plain SQL, one row per root. It walks each tree in preorder (siblings by `pos`, then `id`), opens a node per row, and after each row closes as many nodes as the depth drops to the next row:
+
+<!-- recipe:adjacency -->
+```sql
+WITH RECURSIVE walk AS (
+  SELECT id AS root, id, label, 1 AS depth, ARRAY[pos, id] AS path
+  FROM nodes WHERE parent_id IS NULL
+  UNION ALL
+  SELECT w.root, n.id, n.label, w.depth + 1, w.path || ARRAY[n.pos, n.id]
+  FROM nodes n JOIN walk w ON n.parent_id = w.id
+)
+SELECT root,
+       string_agg('{' || regexp_replace(label, '([{}])', '\\\1', 'g')
+                      || CASE WHEN right(label, 1) = '\' THEN ' ' ELSE '' END
+                      || repeat('}', depth - coalesce(next_depth, 1) + 1),
+                  '' ORDER BY path)::tree AS tree
+FROM (SELECT *, lead(depth) OVER (PARTITION BY root ORDER BY path) AS next_depth FROM walk) s
+GROUP BY root
+```
+<!-- /recipe:adjacency -->
+
+It gives the same trees as `tree_agg(id, parent_id, label ORDER BY pos, id)`, except that rows not connected to a root are silently left out rather than reported.
+
+### JSON: `tree_from_jsonb`
+
+```sql
+SELECT tree_from_jsonb('{"b": [1, "x"], "a": null}');   -- {\{\}{a{null}}{b{[]{1}{x}}}}
+```
+
+Follows the JSON tree model of JEDI (T. Hütter, N. Augsten et al., *JEDI: These aren't the JSON documents you're looking for…*, SIGMOD 2022):
+
+- An object is a node `{}` (written `\{\}`). Its children are one node per key, sorted by key, since objects are unordered; each key node has the value as its only child.
+- An array is a node `[]` with its elements in order.
+- A string is a leaf with its text (no quotes); a number is a leaf with its text as Postgres prints it (`1.10` stays `1.10`); `true`, `false` and `null` are leaves with those labels.
+
+For a `json` column use `tree_from_jsonb(doc::jsonb)`; `jsonb` keeps only the last of duplicate keys.
+
+### XML: `tree_from_xml`
+
+```sql
+SELECT tree_from_xml('<article key="a/b" mdate="2012"><title>On <i>trees</i></title></article>');
+-- {article{key{a/b}}{mdate{2012}}{title{On }{i{trees}}}}
+```
+
+The same layout as the XML-derived datasets (dblp, swissprot):
+
+- An element is a node labelled with its name as written, prefix included (`x:tag`).
+- Its attributes come first, sorted by name, each as `{name{value}}`. Namespace declarations (`xmlns`, `xmlns:x`) count as attributes.
+- Then its content in document order: child elements, and text as leaves. Text is kept as written, surrounding whitespace included; text that is only whitespace is dropped. Adjacent text, CDATA and entity references form one leaf.
+- Comments, processing instructions and the doctype are dropped.
+- Predefined entities (`&lt;`, `&amp;`, …) and character references (`&#65;`) are decoded. Entities declared in a DTD (e.g. dblp's `&uuml;`) are kept as written.
+
+The argument is `text`, because the `xml` type needs a Postgres built with libxml; for an `xml` column use `tree_from_xml(doc::text)`. The document must have exactly one root element.
+
 ## Similarity search: `<~`
 
 `tree <~ tree_query(q, k)` is true iff `TED(tree, q) <= k`. It works with or without an index.
@@ -71,10 +157,10 @@ Selects the Stage-1 lower-bound filter. Results are identical; only speed differ
 
 ### Scan threads
 
-A scan can check entries on several threads inside the backend. Results are identical; the default `1` is single-threaded.
+A scan can check entries on several threads inside the backend. Results are identical at any thread count. The default is `4`; `1` checks entries on the backend alone.
 
 ```sql
-SET tree_search_iam.scan_threads = 8;   -- 1 .. min(CPU count, 64)
+SET tree_search_iam.scan_threads = 8;   -- 1 .. min(max(CPU count, 4), 64)
 ```
 
 With `N > 1`, the backend reads the index and `N` worker threads check the entries while it reads ahead. The workers start with the first such scan and stay for the rest of the session, so later scans pay no startup cost.

@@ -268,10 +268,10 @@ mod tests {
     #[pg_test]
     fn scan_threads_is_registered() {
         let row = Spi::get_one::<String>(
-            "SELECT vartype || ' ' || min_val FROM pg_settings WHERE name = 'tree_search_iam.scan_threads'",
+            "SELECT vartype || ' ' || min_val || ' ' || boot_val FROM pg_settings WHERE name = 'tree_search_iam.scan_threads'",
         )
         .unwrap();
-        assert_eq!(row.as_deref(), Some("integer 1"));
+        assert_eq!(row.as_deref(), Some("integer 1 4"));
     }
 
     #[pg_test(error = "invalid value for enum option \"lb\": nope")]

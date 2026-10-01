@@ -224,7 +224,8 @@ for ds in "${DATASETS[@]}"; do
     # bench_one runs, with the thread count passed as a session setting.
     label=$m
     m=${label%@t*}
-    opts=""
+    # Plain iam_<lb> is the single-threaded baseline, whatever the default is.
+    opts="-c tree_search_iam.scan_threads=1"
     [[ $label == *@t* ]] && opts="-c tree_search_iam.scan_threads=${label##*@t}"
     pair_t0=$(date +%s)
     ran=0

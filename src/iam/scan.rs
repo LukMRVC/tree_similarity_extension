@@ -14,14 +14,20 @@ use super::parallel;
 use super::storage::{self, PageSource, StreamReader};
 use crate::types::{TreeQuery, UnifiedTreeIndex};
 
-static SCAN_THREADS: GucSetting<i32> = GucSetting::<i32>::new(1);
+/// Default `tree_search_iam.scan_threads`.
+const DEFAULT_SCAN_THREADS: i32 = 4;
+
+static SCAN_THREADS: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_SCAN_THREADS);
 
 /// Encoded bytes per batch handed to a scan thread.
 const BATCH_BYTES: usize = 64 << 10;
 
 /// Register `tree_search_iam.scan_threads`. Runs once per backend, from `_PG_init`.
 pub fn register_guc() {
-    let max = std::thread::available_parallelism().map_or(1, |n| n.get()).min(64) as i32;
+    // The default must lie within the range, so the cap never drops below it,
+    // even on machines with fewer cores.
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as i32;
+    let max = cores.clamp(DEFAULT_SCAN_THREADS, 64);
     GucRegistry::define_int_guc(
         c"tree_search_iam.scan_threads",
         c"Threads each tree_search_iam index scan uses to check entries.",

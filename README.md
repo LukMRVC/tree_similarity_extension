@@ -19,6 +19,7 @@ SELECT tree_ed('{a{b}{c}}', '{x{y}{z}}');                        -- 3
 - `tree_search_iam` index access method with a selectable lower-bound filter
 - Two-stage pipelines (lower bound → exact TopDiff) and standalone lower bounds
 - Exact TED via APTED
+- Building trees from adjacency-list rows (`tree_agg`), JSON (`tree_from_jsonb`) and XML (`tree_from_xml`)
 
 **Full reference: [docs/usage.md](docs/usage.md).**
 
@@ -107,7 +108,7 @@ executed is Postgres's `io_method` (PG18). These settings affect scan speed:
 | `effective_io_concurrency`     | `16`           | How many reads a stream keeps in flight.                                                                                  |
 | `io_combine_limit`             | `128kB`        | Adjacent pages merged into one read (capped by `io_max_combine_limit`, restart).                                          |
 | `shared_buffers`               | `128MB`        | An index larger than 1/4 of it is read through a small private ring: it evicts nothing else, but every scan re-reads it. |
-| `tree_search_iam.scan_threads` | `1`            | Threads checking entries per scan (per session).                                                                          |
+| `tree_search_iam.scan_threads` | `4`            | Threads checking entries per scan (per session).                                                                          |
 
 On WSL2, with the index not in shared buffers, `worker` was ~2× slower than `sync` for index scans (rna, 20
 queries: ~590 ms vs ~200 ms), and Postgres's own seq scan was ~5× slower. `io_uring` is untested so far.
