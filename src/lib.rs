@@ -8,6 +8,7 @@ pub extern "C-unwind" fn _PG_init() {
     iam::register();
 }
 
+mod convert;
 mod iam;
 mod lb;
 mod parsing;

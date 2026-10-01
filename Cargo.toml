@@ -23,7 +23,9 @@ twox-hash = { version = "2.1.4", default-features = false, features = ["std", "x
 serde = { version = "1.0.207", features = ["derive"] }
 thiserror = "2.0.18"
 cxx = { version = "1.0.126", features = ["c++17"] }
-serde_json = "1.0.128"
+# arbitrary_precision keeps JSON numbers as written (tree_from_jsonb labels).
+serde_json = { version = "1.0.128", features = ["arbitrary_precision"] }
+quick-xml = "0.42"
 pgrx-bench = { version = "0.19.1", optional = true }
 
 [dev-dependencies]
